@@ -1,0 +1,105 @@
+Steam Multiplayer - changelog
+
+{VERSION}
+- Fullscreen: a game that lost focus (Alt+Tab, a pop-up) could stay invisible when you
+  clicked it on the taskbar. The mod no longer reads the keyboard or mouse while the
+  game is minimized, and a failed read counts as "nothing pressed".
+- SteamMultiplayer.log now says whether the game runs fullscreen or windowed, when its
+  window loses and gets back focus, and when the game stops responding for 20 seconds.
+
+1.1.0
+- The standalone Metal Sonic mod 1.1.2 now works online: the online menus, Metal in
+  the racer list (last, as in his own racer screen), races, and his All-Star.
+  (Players with the Roster Pack's Metal Sonic and players with the standalone 1.1.2
+  can't join each other: their racer lists differ.)
+- Metal Sonic's All-Star (both Metal Sonic mods): his beam now closes on the other
+  players' screens when his All-Star ends; before, it stayed open there.
+- ENABLE MODIFICATIONS, as the consoles asked about downloadable content: CREATE asks
+  "Would you like to enable your modifications?". NO plays without them; YES lets the
+  host turn Metal Sonic and Egg Hangar ON or OFF for that game; Esc closes the question.
+  A mod that is OFF is not used in that game (Metal can't be picked and is never a
+  computer racer; Egg Hangar's course isn't offered), and players who don't have it
+  can still join.
+- The game list's last column is MODS (the consoles' TU2 put DLC there): a game that
+  uses Metal Sonic or Egg Hangar shows their icons, with a red X when you don't have
+  that mod, or an orange dash when you have another version of it; other games show
+  the signal bars.
+- A join refused because of mods says why: "You can't join this game:" and each
+  Egg Hangar / Metal Sonic difference with the same X or dash; other differing mods
+  are mentioned too (SteamMultiplayer.log lists them).
+
+1.0.0 (first public release)
+- Egg Hangar in the online course list (with the Egg Hangar mod installed), with the
+  console's own lobby picture and name, as the consoles' Metal Sonic pack added it.
+- [Voice] Volume now goes up to 300 (percent) for quiet microphones.
+- Not yet: the standalone Metal Sonic mod (1.1.0 Beta 3, 1.1.2): with it installed the
+  online menus stay off (1.1).
+- Course intro: Enter skips it on your own screen; left alone it ends once the announcer
+  and the intro music have finished (25 s at most). The short racer intro follows (Enter
+  skips it too), then the countdown starts together.
+- The lobby as on the consoles, with the Mac version's keys: Up/Down move the red bar
+  over the players; F1 on another player's bar opens VIEW STEAM PROFILE / MUTE / KICK
+  (host) / RETURN TO LOBBY (MUTE: you stop hearing that player's voice chat and their
+  bar turns yellow; the popup then offers UNMUTE), F1 on your own bar changes your racer; Enter starts the race (host)
+  and explains a refusal ("There must be at least two players...", "Not all players are
+  ready."); F2 SETTINGS (host); A INVITE FRIENDS; Esc asks before you leave; the console's error
+  messages (host lost, game full, create failed, kicked) with OK back to the main menu.
+- Lobbies of up to 8 players; when the host leaves, the lobby goes on with a new host.
+- The consoles' busy spinner: SEARCHING on the game list while Steam searches; CREATING
+  or JOINING in the lobby until Steam has made or joined it (Esc cancels), then your
+  racer pick. While the host's START waits for a player's game to be able to connect, the
+  spinner says CONNECTING.
+- As on the consoles: the host leaving a race from the pause menu is warned that this ends
+  the session for the other players; a player who left a race early watches the others'
+  race in the lobby; a player who joins while a race runs picks a racer once it is over;
+  Steam's friends list says "In a network lobby" / "In a network game"; each game in the
+  list shows its host's license flag; catch-up no longer flips for an instant at the line.
+- The console's session messages: when the other players are gone mid-race ("The
+  connection to the other player(s) has been lost", RETURN TO LOBBY), when the host is
+  gone, or when the host ends the match; OK takes you back to the lobby.
+- Joining while a race runs: the newcomer waits in the lobby and sees the race's
+  progress bar (a marker per racer moving to the flag); the racers see "X HAS JOINED
+  THE LOBBY." and the other lobby notices at the bottom of the screen, as on the
+  consoles.
+- Online races over Steam through the game's Multiplayer menus: Play with Friends,
+  Play with Everyone, create and join lobbies of up to 8 players, Steam "Join Game"
+  and invites (also when the game isn't running yet).
+- Mod check: a join is refused, with the differences in the log, unless every player
+  has the same mods and the same version of this mod.
+- Races start together on every PC (loading and countdown wait for everyone); the
+  host's course, laps, computer-racer difficulty and items are used everywhere.
+- The other players' cars move smoothly; laps, places and finishing times match on
+  every screen; RACE ENDS IN after the first finish; shared results with 1P/2P badges.
+- The host's game drives the computer racers, so they are in the same places on
+  every screen.
+- Items and All-Star moves show on every screen; each car's own game decides them.
+- RETURN TO LOBBY after the results and in the pause menu.
+- A player who leaves mid-race: their car goes on as a computer racer.
+- The game keeps running when its window is unfocused or dragged (can be switched off).
+- Works with and without the All-Stars Roster Pack racers.
+- The Multiplayer menu's online tiles say STEAM instead of Xbox LIVE; every player's
+  loading screen shows the same tips.
+- The announcer and the drivers' voices are shared: the same intro recordings, the
+  host's commentary on every screen, fair call-outs (passes, hits, All-Stars) for
+  every player, each player's racer's shouts heard by all.
+- All-Star moves fire on every screen when their owner fires, with the owner's aim or
+  choice, for every racer (Opa-Opa's weapon and shots, Super Sonic, AiAi, B.D. Joe,
+  Eggman, Shadow, Alex Kidd, Zobio, Ryo, Knuckles, Amy, Ulala, Beat, Bonanza Bros).
+- Voice chat over Steam: push-to-talk (hold V) or an open microphone, in the lobby
+  and during the race; a speech bubble on the bar of whoever talks. Settings in
+  config.ini [Voice] (key, volume, mute).
+- The host can kick a player from the lobby (their menu's KICK, which asks first);
+  a kicked player can't rejoin that lobby.
+- Play with Everyone lists your friends' games too; games of another version of
+  this mod or with other mods are shown as such and refused before a join; the
+  list's STATUS column says LOBBY or GAME.
+- VIEW PROFILE / GAMER CARD: the selected host's Steam profile from the game list
+  (the A key), a player's from the results (Up/Down, F1).
+- The game list as the Mac's: Enter JOIN, F2 REFRESH, A VIEW PROFILE, F1 CREATE GAME,
+  Esc BACK. The A key (config.ini [Menus] InviteKey) has its own key picture in the
+  footers, an A cap added to the game's key font, and the lobby player menu's VIEW GAMER
+  CARD reads VIEW STEAM PROFILE: both come with this mod, also next to Metal Sonic (it
+  carries a version of those menu files made for Metal Sonic's; needs ChaoGarage 1.2.0).
+- The lobby's race bar says VIEWING RESULTS for a player on the results screen.
+- "The connection to Steam has been lost." when Steam drops while in a lobby;
+  searches are refused at once while Steam is disconnected.

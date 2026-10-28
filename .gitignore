@@ -1,0 +1,16 @@
+third_party/
+build/
+out/
+menus/base/
+menus/out/
+reference/
+re/bin/
+__pycache__/
+*.log
+*.smosbin
+*.sbn
+*.xpac
+*.exe
+*.dll
+*.pdb
+*.obj

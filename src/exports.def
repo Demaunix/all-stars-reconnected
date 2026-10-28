@@ -1,0 +1,6 @@
+LIBRARY SteamMultiplayer
+EXPORTS
+    SsasrModInitialize
+    SsasrModRollback
+    SteamMpTestPost
+    SteamMpTestRead
