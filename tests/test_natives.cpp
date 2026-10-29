@@ -93,6 +93,7 @@ int32_t RaceProfileNative(int32_t field, int32_t up, int32_t down, int32_t f1) {
 static int g_afterCalls = 0;
 void RaceNativeAfter(void*, NativeCall*) { ++g_afterCalls; }
 bool RaceNativeBefore(void*, NativeCall*) { return false; }
+void RaceMainMenuJoinCheck(void*) {}
 
 struct Desc {
     uint32_t id; uint8_t normal, pad[3]; const uint8_t* types; const uint32_t* values; uint32_t argc, ret, retType;

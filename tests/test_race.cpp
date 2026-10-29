@@ -34,6 +34,7 @@ void RaceTestSetItems(bool on);
 void RaceTestSetItemConfig(bool config, bool hooks);
 void RaceTestSetItemAddresses(uintptr_t alloc, uintptr_t free, uintptr_t projectileType);
 void RaceTestSetReactionAddress(uintptr_t play);
+void RaceTestSetClockAddresses(uintptr_t app, uintptr_t stepAcc, uintptr_t stepCount, uintptr_t frameSteps, uintptr_t raceClock);
 enum { kH0905, kH0900, kH090a, kHSetup, kHWaiting, kHWaitingNoIntro, kHTrackIntro, kHCharIntro, kHCountdown, kHRacing, kHRacerCommit, kHWff, kH0912,
        kH1b01, kH0916, kH2003, kH1304, kH0913, kHEventPost, kHRacerMessage, kHExhaust, kHCatchup,
        kHTakeSelect = kHCatchup + 3, kHTakeSource, kHSpeechUpdate, kHRacerTrack, kHRaceEnd, kHRacerUpdate, kHRacerListener, kHOpaStart, kHOpaInput,
@@ -43,6 +44,16 @@ enum { kIdle, kArmed, kCreating, kCreated, kSetUp, kHoldA, kIntros, kHoldB, kRun
 
 static int g_fail = 0, g_checks = 0;
 #define CHECK(c) do { ++g_checks; if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); ++g_fail; } } while (0)
+
+// A fake script module for the call-site checks (race.cpp ScriptSite finds a site's bytes in the bound module's code): the
+// "smosbinL" header the game's modules carry (+8 size, +0xc code offset 0x50, +0x10 code length), the rest zero; a test then
+// copies a site's bytes to its offset.
+static void FakeModule(uint8_t* m, size_t size) {
+    memset(m, 0, size);
+    memcpy(m, "smosbinL", 8);
+    uint32_t words[3] = {(uint32_t)size, 0x50, (uint32_t)size - 0x50};
+    memcpy(m + 8, words, sizeof(words));
+}
 
 // ---------------------------------------------------------------- fakes: log, lobby, network
 void Log(bool, const wchar_t* fmt, ...) {
@@ -78,6 +89,14 @@ bool LobbyPostArgs(LobbyCommandKind kind, const int32_t* args, int count) {
     return true;
 }
 void LobbyRead(LobbySnapshot& out) { out = g_snap; }
+// The auto-update's notice state (src\update.cpp in the DLL; here the test sets it): the "applied" one first, then "ready".
+static bool g_noticeApplied = false, g_noticeReady = false;
+static std::vector<int> g_noticesShown;
+int AutoUpdateNoticePending() { return g_noticeApplied ? 2 : g_noticeReady ? 1 : 0; }
+void AutoUpdateNoticeShown(int kind) {
+    g_noticesShown.push_back(kind);
+    (kind == 2 ? g_noticeApplied : g_noticeReady) = false;
+}
 bool RaceNetSend(uint64_t to, const void* data, size_t size, bool reliable) {
     if (g_sendFails > 0) { --g_sendFails; return false; }
     RaceNetMsg m = {};
@@ -97,6 +116,7 @@ int RaceNetReceive(RaceNetMsg* out, int max) {
     return n;
 }
 void RaceNetActive(bool on) { g_active = on; }
+void LobbyNoteRaceStart() {}  // (the friend figures' once-per-race note to the Steam worker, from Hook0905; nothing to check here)
 uint64_t RaceNetSelf() { return g_self; }
 
 static void Deliver(uint64_t from, const void* data, size_t size, bool reliable = true) {
@@ -907,7 +927,7 @@ static void TestBadges() {
     *(int32_t*)(g_racerMem[0] + 0x9dc) = 0;  // as the game numbers them on the host: its human 0, the rest AI (8)
     *(int32_t*)(g_racerMem[1] + 0x9dc) = 8;
     static uint8_t module[0x5000];
-    memset(module, 0, sizeof(module));
+    FakeModule(module, sizeof(module));
     const uint8_t code[] = {0x32, 0x01, 0x12, 0x09, 0x00, 0x00, 0x96, 0x09, 0x07, 0x01, 0x31, 0x4b, 0x14};
     memcpy(module + 0x4239, code, sizeof(code));
     struct { void* vtable; uint8_t* pc; uint8_t* mod; } vm = {nullptr, module + 0x4239 + 8, module};
@@ -942,7 +962,7 @@ static void TestResultsNames() {
     printf("results rows: the players' names\n");
     HostRunning();
     static uint8_t module[0x5000];
-    memset(module, 0, sizeof(module));
+    FakeModule(module, sizeof(module));
     const uint8_t row[] = {0x32, 0x01, 0x12, 0x09, 0x00, 0x00, 0x96, 0x09, 0x07, 0x01, 0x31, 0x4b, 0x14};
     const uint8_t name[] = {0x07, 0x06, 0x51, 0x01, 0x23, 0x3b, 0x32, 0x02, 0x12, 0x16, 0x00, 0x00, 0x9f, 0x09, 0x18};
     memcpy(module + 0x4239, row, sizeof(row));
@@ -996,7 +1016,7 @@ static void TestPauseTitle() {
     *(int32_t*)(g_racerMem[0] + 0x9dc) = 8;  // as the game numbers them on a guest: the host's car an AI, its own 0
     *(int32_t*)(g_racerMem[1] + 0x9dc) = 0;
     static uint8_t module[0x1000];
-    memset(module, 0, sizeof(module));
+    FakeModule(module, sizeof(module));
     const uint8_t code[] = {0x0b, 0x01, 0x3a, 0x32, 0x01, 0x0f, 0x0f, 0x01, 0x00, 0x0b, 0x02, 0x51, 0x00, 0x27};
     memcpy(module + 0x0bf4 - 11, code, sizeof(code));
     struct { void* vtable; uint8_t* pc; uint8_t* mod; } vm = {nullptr, module + 0x0bf4, module};
@@ -1033,12 +1053,16 @@ static void TestLoadingTips() {
     CHECK(RaceHostStart() == kStartOk);
     RaceContract sent;
     CHECK(DecodeContract(g_sent[0].data, g_sent[0].size, sent));
-    static uint8_t module[0x1000];
-    memset(module, 0, sizeof(module));
+    // One module per bridge version (the stock game's, the Roster Pack's, the standalone Metal Sonic 1.1.2's): the same bytes at
+    // their own place in each; the site is found by them wherever they lie.
+    static uint8_t module[0x1000], roster[0x1000], metal[0x1000];
+    FakeModule(module, sizeof(module));
+    FakeModule(roster, sizeof(roster));
+    FakeModule(metal, sizeof(metal));
     const uint8_t code[] = {0x55, 0x00, 0x07, 0x03, 0x3a, 0x32, 0x02, 0x02, 0x1d, 0x01, 0x00, 0xc4, 0x00, 0x57, 0x16, 0x07, 0x02, 0x23};
     memcpy(module + 0x09e6 - 13, code, sizeof(code));
-    memcpy(module + 0x0a88 - 13, code, sizeof(code));
-    memcpy(module + 0x0a0d - 13, code, sizeof(code));  // the standalone Metal Sonic 1.1.2's bridge
+    memcpy(roster + 0x0a88 - 13, code, sizeof(code));
+    memcpy(metal + 0x0a0d - 13, code, sizeof(code));  // the standalone Metal Sonic 1.1.2's bridge
     struct { void* vtable; uint8_t* pc; uint8_t* mod; } vm = {nullptr, module + 0x09e6, module};
     uint32_t v[2] = {0, 18};
     uint8_t t[2] = {kTypeInt, kTypeInt};
@@ -1047,16 +1071,20 @@ static void TestLoadingTips() {
     RaceLaunched(true);
     CHECK(!RaceNativeBefore(&vm, &d) && g_seed == (sent.seed ^ 0x54495053));
     g_seed = 0;
-    vm.pc = module + 0x0a88;  // the Roster Pack's copy
+    vm.pc = roster + 0x0a88;  // the Roster Pack's copy
+    vm.mod = roster;
     CHECK(!RaceNativeBefore(&vm, &d) && g_seed == (sent.seed ^ 0x54495053));
     g_seed = 0;
-    vm.pc = module + 0x0a0d;  // Metal 1.1.2's copy
+    vm.pc = metal + 0x0a0d;  // Metal 1.1.2's copy
+    vm.mod = metal;
     CHECK(!RaceNativeBefore(&vm, &d) && g_seed == (sent.seed ^ 0x54495053));
     g_seed = 0;
-    vm.pc = module + 0x0a88 + 0x100;  // another 1d02
+    vm.pc = roster + 0x0a88 + 0x100;  // another 1d02
+    vm.mod = roster;
     RaceNativeBefore(&vm, &d);
     CHECK(g_seed == 0);
     vm.pc = module + 0x09e6;
+    vm.mod = module;
     module[0x09e6 - 13] = 0x56;  // the right place, other code
     RaceNativeBefore(&vm, &d);
     CHECK(g_seed == 0);
@@ -1127,6 +1155,8 @@ static void TestJoinLeavesRace() {
     RaceTestSetJoinAddresses((uintptr_t)&FakePostMessage, (uintptr_t)&FakeClear, (uintptr_t)&FakeClear, (uintptr_t)&FakeClear,
                              (uintptr_t)&FakeBlackboard, (uintptr_t)&g_worldPaused, (uintptr_t)g_profiles);
     static uint8_t game[0x800], front[0x1000];
+    FakeModule(game, sizeof(game));
+    FakeModule(front, sizeof(front));
     const uint8_t inbox[] = {0x51, 0x01, 0x32, 0x01, 0x0e, 0x16, 0x02, 0x00, 0x2f, 0x00};
     const uint8_t frontCode[] = {0x02, 0x2b, 0xc7, 0xd1, 0x72, 0x32, 0x01, 0x01, 0x1b, 0x01, 0x00, 0x92, 0x00};
     memcpy(game + 0x0496 - 10, inbox, sizeof(inbox));
@@ -1201,6 +1231,9 @@ static void TestJoinLeavesRace() {
 static void TestReturnToLobby() {
     printf("return to the lobby\n");
     static uint8_t results[0x5000], pause[0x2000], front[0x1000];
+    FakeModule(results, sizeof(results));
+    FakeModule(pause, sizeof(pause));
+    FakeModule(front, sizeof(front));
     const uint8_t resultsCode[] = {0x32, 0x00, 0x16, 0x09, 0x00, 0x00, 0x2a, 0x04, 0x32, 0x00, 0x38, 0x09, 0x00, 0x00, 0x2b, 0x04};
     const uint8_t pauseCode[] = {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0x2f, 0x02, 0x51, 0x00, 0x02, 0x3b, 0x66, 0xef, 0x33};
     const uint8_t frontCode[] = {0x02, 0x2b, 0xc7, 0xd1, 0x72, 0x32, 0x01, 0x01, 0x1b, 0x01, 0x00, 0x92, 0x00};
@@ -1370,6 +1403,9 @@ static void TestEggCourse() {
 static void TestHostRules() {
     printf("host's rules\n");
     static uint8_t rp[0x3000], st[0x3000], mt[0x3000];
+    FakeModule(rp, sizeof(rp));
+    FakeModule(st, sizeof(st));
+    FakeModule(mt, sizeof(mt));
     const uint8_t diff[] = {0x51, 0x03, 0x32, 0x01, 0x03, 0x20, 0x01, 0x00, 0xbe, 0x03};
     const uint8_t count[] = {0x51, 0x01, 0x32, 0x01, 0x03, 0x20, 0x01, 0x00, 0xcb, 0x03};
     memcpy(rp + 0x2120, diff, sizeof(diff));   // Roster Pack fe_game_bridge: INT8 3; NAT 2003 at 0x2122
@@ -1527,7 +1563,7 @@ static void TestQuitBox() {
     printf("quit box: the host's session warning\n");
     HostRunning();
     static uint8_t module[0x2000];
-    memset(module, 0, sizeof(module));
+    FakeModule(module, sizeof(module));
     const uint8_t a[] = {0x02, 0x77, 0xa4, 0xc1, 0xf1, 0x0b, 0x01, 0x3c, 0x32, 0x02, 0x1f, 0x02, 0x01, 0x00, 0xc4, 0x03};
     const uint8_t b[] = {0x02, 0xe2, 0x82, 0x75, 0x37, 0x0b, 0x01, 0x3c, 0x32, 0x02, 0x1f, 0x02, 0x01, 0x00, 0xc5, 0x03};
     memcpy(module + 0x16cd, a, sizeof(a));
@@ -1912,6 +1948,7 @@ static void TestCatchup() {
 static uint8_t g_bridge[0x3000];
 static FakeVm CountSite() {
     const uint8_t count[] = {0x51, 0x01, 0x32, 0x01, 0x03, 0x20, 0x01, 0x00, 0xcb, 0x03};
+    FakeModule(g_bridge, sizeof(g_bridge));
     memcpy(g_bridge + 0x20f7, count, sizeof(count));  // stock fe_game_bridge: INT8 1; NAT 2003 at 0x20f9
     return FakeVm{nullptr, g_bridge + 0x2101, g_bridge};
 }
@@ -2881,7 +2918,7 @@ static void TestItemsOff(bool config, bool hooks) {
 static void TestFinishPanel() {
     printf("finish panel: this game's car\n");
     static uint8_t module[0x5000];
-    memset(module, 0, sizeof(module));
+    FakeModule(module, sizeof(module));
     const uint8_t code[] = {0x51, 0x00, 0x32, 0x01, 0x13, 0x09, 0x00, 0x00, 0xd8, 0x07, 0x07, 0x01, 0x51, 0x00, 0x23};
     memcpy(module + 0x37f8, code, sizeof(code));
     struct { void* vtable; uint8_t* pc; uint8_t* mod; } vm = {nullptr, module + 0x3802, module};
@@ -2898,6 +2935,7 @@ static void TestFinishPanel() {
     CHECK(ask(&vm) == 1);  // the guest's own car
     struct { void* vtable; uint8_t* pc; uint8_t* mod; } other = {nullptr, module + 0x352b + 8, module};
     memcpy(module + 0x352b - 2, code, sizeof(code));
+    module[0x352b - 2 + 8] = 0xd9;  // (another 0913(0) call has its own line number: the site's bytes stay the one place)
     CHECK(ask(&other) == 0);  // the same native elsewhere: untouched
     module[0x37f8 + 12] = 0x52;  // the right place, different code (another mod's results)
     CHECK(ask(&vm) == 0);
@@ -2913,6 +2951,7 @@ static void TestFinishPanel() {
 static void TestOnlinePause() {
     printf("online pause: the pause menu's online path\n");
     static uint8_t pause[0x2000];
+    FakeModule(pause, sizeof(pause));
     struct Site { uint32_t pc; uint8_t code[16]; };
     const Site sites[] = {
         {0x04c4, {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0xb8, 0x00, 0x51, 0x05, 0x4b, 0x14, 0x21, 0x00, 0x32, 0x00}},
@@ -2958,6 +2997,7 @@ static void TestOnlinePause() {
     // the results' own RESULTS_START write.
     {
         static uint8_t results[0x2000];
+        FakeModule(results, sizeof(results));
         const uint8_t start[] = {0x02, 0x0e, 0x42, 0xd2, 0x86, 0x51, 0x01, 0x32, 0x02, 0x03, 0x1b, 0x00, 0x00, 0xc6, 0x02};
         memcpy(results + 0x1ade, start, sizeof(start));
         Vm elsewhere = {nullptr, results + 0x1aee, results}, resultsStart = {nullptr, results + 0x1aed, results};
@@ -3009,6 +3049,7 @@ static NativeCall HudCall(void* vm, uint32_t id, int32_t arg, uint32_t ret, uint
 static void TestNameTags() {
     printf("name tags: the HUD tags the other players' cars\n");
     static uint8_t hud[0x7000];
+    FakeModule(hud, sizeof(hud));
     const uint8_t gate[] = {0x32, 0x00, 0x38, 0x09, 0x00, 0x00, 0x18, 0x04, 0x51, 0x01, 0x48, 0x14, 0x0c, 0x00};
     const uint8_t human[] = {0x07, 0x01, 0x39, 0x32, 0x01, 0x11, 0x09, 0x00, 0x00, 0x8b, 0x09, 0x14, 0x17, 0x00};
     memcpy(hud + 0x36b6, gate, sizeof(gate));
@@ -3026,7 +3067,7 @@ static void TestNameTags() {
     CHECK(HudCall(&gvm, 0x0938, -1, 1, kTypeHash, &t, &v).retType == kTypeHash);  // type kept
     CHECK(HudCall(&hvm, 0x0911, 1, 0, kTypeInt, &t, &v).retValue == 1);  // the guest's car: human for the tags
     CHECK(HudCall(&hvm, 0x0911, 0, 1, kTypeInt, &t, &v).retValue == 1);  // ours: as the game said
-    CHECK(HudCall(&hvm, 0x0911, 3, 0, kTypeInt, &t, &v).retValue == 0);  // an AI: no tag
+    CHECK(HudCall(&hvm, 0x0911, 3, 0, kTypeInt, &t, &v).retValue == 1);  // an AI: tagged too (1.1.1, its racer's name)
     CHECK(HudCall(&elsewhere, 0x0911, 1, 0, kTypeInt, &t, &v).retValue == 0);  // 0911 elsewhere: untouched
     hud[0x36b6 + 9] = 0x02;  // the right place, other code (another mod's hud)
     CHECK(HudCall(&gvm, 0x0938, -1, 1, kTypeInt, &t, &v).retValue == 1);
@@ -3041,6 +3082,14 @@ static void TestNameTags() {
     g_textCalls = 0;
     CHECK(RaceNativeBefore(&tvm, &d2) && g_textCalls == 1 && g_textElement == 0x384c35c0);
     CHECK(strcmp(g_textSeen, "Bravo 2") == 0);
+    tv[1] = 0x68ec5037;  // "4P": a computer racer's car shows its racer's menu name (1.1.1)
+    CHECK(RaceNativeBefore(&tvm, &d2) && g_textCalls == 2);
+    bool isRacerName = false;
+    for (const RacerEntry& e : kRacersStock) isRacerName = isRacerName || strcmp(g_textSeen, e.display) == 0;
+    for (const RacerEntry& e : kRacersRoster) isRacerName = isRacerName || strcmp(g_textSeen, e.display) == 0;
+    CHECK(isRacerName && strcmp(g_textSeen, "Bravo 2") != 0);
+    printf("    the computer racer's tag reads \"%s\"\n", g_textSeen);
+    g_textCalls = 1;
     tv[1] = 0x1c49c7c3;  // "1P": this game's own player is never tagged here
     CHECK(!RaceNativeBefore(&tvm, &d2) && g_textCalls == 1);
     tv[1] = 0x12345678;  // not a player label
@@ -3053,6 +3102,7 @@ static void TestNameTags() {
     CHECK(!RaceNativeBefore(&other, &d2));  // 021f elsewhere
     // Egg Hangar's hud (the same code, later: gate 0x36d4, human 0x5b7f, text 0x5cc4): the tags and their text there too.
     static uint8_t egg[0x7000];
+    FakeModule(egg, sizeof(egg));
     memcpy(egg + 0x36d4, gate, sizeof(gate));
     memcpy(egg + 0x5b7c, human, sizeof(human));
     memcpy(egg + 0x5cc4 - 6, text, sizeof(text));
@@ -3359,6 +3409,7 @@ static void TestToasts() {
     *(uint32_t**)(g_toastElement + 0x108) = g_toastObj;
     g_toastObj[3] = (uint32_t)(uintptr_t)g_toastBuf;
     static uint8_t hud[0x7000];
+    FakeModule(hud, sizeof(hud));
     const uint8_t gate[] = {0x32, 0x00, 0x38, 0x09, 0x00, 0x00, 0x18, 0x04, 0x51, 0x01, 0x48, 0x14, 0x0c, 0x00};
     memcpy(hud + 0x36b6, gate, sizeof(gate));
     struct { void* vtable; uint8_t* pc; uint8_t* mod; } gvm = {nullptr, hud + 0x36b6 + 8, hud}, elsewhere = {nullptr, hud + 0x3c94 + 8, hud};
@@ -3470,6 +3521,57 @@ static void __fastcall FakeRelease(uint32_t* arr, void*) {
 }
 static uint32_t g_none[2] = {0, 0};
 
+// 1.1.1, the auto-update's notices on the main menu (re\update-dialogs\FINDINGS.md C).
+static void TestUpdateNotices() {
+    printf("update notices: posted at our fe_mainmenu's join check, once each, a Steam join first\n");
+    RaceTestSetJoinAddresses((uintptr_t)&FakePostMessage, (uintptr_t)&FakeClear, (uintptr_t)&FakeClear, (uintptr_t)&FakeClear,
+                             (uintptr_t)&FakeBlackboard, (uintptr_t)&g_worldPaused, (uintptr_t)g_profiles);
+    *(uint32_t*)(g_arrayHelper + 4) = 0x29;
+    RaceTestSetDialogAddresses((uintptr_t)g_arrayHelper, (uintptr_t)&FakeArrayCreate, (uintptr_t)&FakeArraySet, (uintptr_t)&FakeRelease,
+                               (uintptr_t)g_none);
+    static uint8_t menu[0x2000], other[0x2000];
+    FakeModule(menu, sizeof(menu));
+    FakeModule(other, sizeof(other));
+    const uint8_t site[] = {0x57, 0x16, 0x02, 0x85, 0x3a, 0xb8, 0x6c, 0x4b, 0x14, 0x3b, 0x00, 0x32, 0x00, 0x1c, 0x7a, 0x01, 0x00, 0xfe, 0x7f};
+    memcpy(menu + 0x1c1a - 19, site, sizeof(site));
+    memcpy(other + 0x1c1a - 19, site, sizeof(site));
+    other[0x1c1a - 19 + 3] = 0x86;  // another module: the bytes differ
+    struct { void* vtable; uint8_t* pc; uint8_t* mod; } mvm = {nullptr, menu + 0x1c1a, menu}, ovm = {nullptr, other + 0x1c1a, other},
+                                                           wrongPc = {nullptr, menu + 0x1c20, menu};
+    auto DialogPosts = [&]() { int n = 0; for (const PostSeen& p : g_posted) if (p.target == 0x694fe697 && p.msg == 0xdfea0f93) ++n; return n; };
+    g_posted.clear();
+    g_noticesShown.clear();
+    g_postOk = g_arrayOk = true;
+    g_snap = LobbySnapshot();
+    g_noticeApplied = g_noticeReady = false;
+    RaceMainMenuJoinCheck(&mvm);
+    CHECK(DialogPosts() == 0);  // nothing pending: nothing posted
+    g_noticeApplied = g_noticeReady = true;
+    RaceMainMenuJoinCheck(&ovm);
+    RaceMainMenuJoinCheck(&wrongPc);
+    CHECK(DialogPosts() == 0 && g_noticesShown.empty());  // another call site of 7a1c: never
+    g_snap.state = kLobbyInLobby;
+    g_snap.pendingJoin = 0x0186000012345601ull;
+    RaceMainMenuJoinCheck(&mvm);
+    CHECK(DialogPosts() == 0);  // a Steam join waits: it leaves the main menu first
+    g_snap = LobbySnapshot();
+    g_postOk = false;
+    RaceMainMenuJoinCheck(&mvm);
+    CHECK(g_noticesShown.empty() && g_noticeApplied);  // the queue full: kept for the next frame
+    g_postOk = true;
+    RaceMainMenuJoinCheck(&mvm);
+    CHECK(DialogPosts() == 1 && g_arrayElems[0][0] == 0x75cf8f27 && g_arrayElems[0][1] == kTypeHash && g_arrayElems[1][0] == 0);
+    CHECK(g_noticesShown.size() == 1 && g_noticesShown[0] == 2 && !g_noticeApplied);  // the "updated" one first
+    RaceMainMenuJoinCheck(&mvm);
+    CHECK(DialogPosts() == 1);  // the "ready" one waits 1.5 s
+    Sleep(1600);
+    RaceMainMenuJoinCheck(&mvm);
+    CHECK(DialogPosts() == 2 && g_arrayElems[0][0] == 0x9dc5ca23 && g_noticesShown.size() == 2 && g_noticesShown[1] == 1);
+    Sleep(1600);
+    RaceMainMenuJoinCheck(&mvm);
+    CHECK(DialogPosts() == 2);  // each once
+}
+
 static void TestSessionDialogs() {
     printf("session messages: the console's dialogs when the others are gone\n");
     RaceTestSetJoinAddresses((uintptr_t)&FakePostMessage, (uintptr_t)&FakeClear, (uintptr_t)&FakeClear, (uintptr_t)&FakeClear,
@@ -3478,6 +3580,8 @@ static void TestSessionDialogs() {
     RaceTestSetDialogAddresses((uintptr_t)g_arrayHelper, (uintptr_t)&FakeArrayCreate, (uintptr_t)&FakeArraySet, (uintptr_t)&FakeRelease,
                                (uintptr_t)g_none);
     static uint8_t game[0x800], dialogs[0x800];
+    FakeModule(game, sizeof(game));
+    FakeModule(dialogs, sizeof(dialogs));
     const uint8_t inbox[] = {0x51, 0x01, 0x32, 0x01, 0x0e, 0x16, 0x02, 0x00, 0x2f, 0x00};
     const uint8_t close[] = {0x02, 0x1f, 0x96, 0x4b, 0x42, 0x32, 0x01, 0x06, 0x02, 0x01, 0x00, 0x5e, 0x01};
     memcpy(game + 0x0496 - 10, inbox, sizeof(inbox));
@@ -3572,6 +3676,7 @@ static void TestSessionDialogs() {
     // After a pause and CONTINUE the message still comes (the pause menu is closed again); while the pause menu is
     // open, neither the post nor the answer's quit goes out.
     static uint8_t pause[0x1000];
+    FakeModule(pause, sizeof(pause));
     const uint8_t openCode[] = {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0xb8, 0x00, 0x51, 0x05, 0x4b, 0x14, 0x21, 0x00, 0x32, 0x00};
     const uint8_t unpauseCode[] = {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0x94, 0x01, 0x51, 0x05, 0x4b, 0x14, 0x0c, 0x00, 0x32, 0x00};
     const uint8_t pollCode[] = {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0xf4, 0x00, 0x51, 0x05, 0x4a, 0x02, 0x0e, 0x42, 0xd2, 0x86};  // the race-end poll, every frame
@@ -3679,6 +3784,7 @@ static void TestProgress() {
     // bar's VIEWING RESULTS for a player waiting there), once; the close then clears the record.
     {
         static uint8_t results[0x2000];
+        FakeModule(results, sizeof(results));
         const uint8_t start[] = {0x02, 0x0e, 0x42, 0xd2, 0x86, 0x51, 0x01, 0x32, 0x02, 0x03, 0x1b, 0x00, 0x00, 0xc6, 0x02};
         memcpy(results + 0x1ade, start, sizeof(start));
         struct { void* vtable; uint8_t* pc; uint8_t* mod; } vm = {nullptr, results + 0x1aed, results};
@@ -6552,7 +6658,7 @@ static void TestProfileCursor() {
     RaceContract c = HostRunning();
     RaceTestSetReturnFlag(true);
     static uint8_t module[0x7000];
-    memset(module, 0, sizeof(module));
+    FakeModule(module, sizeof(module));
     const uint8_t row[] = {0x32, 0x01, 0x12, 0x09, 0x00, 0x00, 0x96, 0x09, 0x07, 0x01, 0x31, 0x4b, 0x14};
     const uint8_t start[] = {0x02, 0x0e, 0x42, 0xd2, 0x86, 0x51, 0x01, 0x32, 0x02, 0x03, 0x1b, 0x00, 0x00, 0xc6, 0x02};
     const uint8_t list[] = {0x32, 0x00, 0x16, 0x09, 0x00, 0x00, 0x9d, 0x04, 0x51, 0x05, 0x4a, 0x14, 0x08, 0x00, 0x57, 0x09};
@@ -6612,29 +6718,396 @@ static void TestProfileCursor() {
     Reset();
 }
 
-// The `results` module's call sites race.cpp checks, against the module our build substitutes (menus\out\results.smosbin):
-// every site after 0x25e1 moved by the profile cursor's 12-byte insertion (the independent check of m7zh found three that hadn't).
-static void TestResultsModuleSites(const char* path) {
-    printf("results module: every call site matches the built module\n");
+// ---------------------------------------------------------------- script sites found by their bytes (1.1.1-dp13)
+// race.cpp ScriptSite identifies a call site by its bytes, found once in the bound module's code (the offset is a hint for the
+// log): another mod may rebuild fe_mainmenu or front_main in memory with a row or a line inserted before a site. These tests run
+// the resolver (RaceTestSitePc) over the real modules: every site once in its module of each real package and in no other
+// module there, our built modules, the rebuilt copies (reference\rebuilt-menus), and made-up modules for the rules.
+static std::vector<std::vector<uint8_t>> g_siteFiles;  // kept for the run: the resolver remembers modules by address
+
+static const uint8_t* LoadBytes(const char* path, size_t* size) {
     FILE* f = nullptr;
     fopen_s(&f, path, "rb");
-    if (!f) { printf("FAIL: cannot open %s\n", path); ++g_fail; return; }
-    static uint8_t module[0x10000];
-    size_t n = fread(module, 1, sizeof(module), f);
+    if (!f) return nullptr;
+    std::vector<uint8_t> bytes;
+    uint8_t buf[0x10000];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) bytes.insert(bytes.end(), buf, buf + n);
     fclose(f);
-    CHECK(n > 0x6600 && n < sizeof(module) && memcmp(module, "smosbinL", 8) == 0);
-    RaceTestSite sites[16];
-    int count = RaceTestResultsSites(sites, 16);
-    CHECK(count == 6);
+    g_siteFiles.push_back(std::move(bytes));
+    *size = g_siteFiles.back().size();
+    return g_siteFiles.back().data();
+}
+
+static uint32_t U32At(const uint8_t* p) {
+    uint32_t v;
+    memcpy(&v, p, 4);
+    return v;
+}
+
+struct PkgModule { uint32_t hash; const uint8_t* bytes; uint32_t size; };
+// The modules of a smospkg2 package (tools\sbn.py: 32-byte entries from +40; +16 the name hash, +28 the module's self-relative
+// offset; a module's size at its +8).
+static std::vector<PkgModule> PackageModules(const uint8_t* pkg, size_t size) {
+    std::vector<PkgModule> out;
+    if (size < 40 || memcmp(pkg, "smospkg2", 8) != 0 || U32At(pkg + 8) != 32) return out;
+    uint32_t count = U32At(pkg + 12);
+    for (uint32_t i = 0; i < count && 40 + 32 * (size_t)i + 32 <= size; ++i) {
+        const uint8_t* e = pkg + 40 + 32 * i;
+        uint32_t at = (uint32_t)(e + 28 - pkg) + U32At(e + 28);
+        if (at + 0x50 > size || memcmp(pkg + at, "smosbinL", 8) != 0) continue;
+        uint32_t n = U32At(pkg + at + 8);
+        if (at + n > size) continue;
+        out.push_back({U32At(e + 16), pkg + at, n});
+    }
+    return out;
+}
+
+static bool KnownAt(const ScriptSiteDef& s, uint32_t pc) {
+    for (uint32_t k : s.known)
+        if (k && k == pc) return true;
+    return false;
+}
+
+static const ScriptSiteDef* SiteNamed(const char* name) {
+    const ScriptSiteDef* sites[48];
+    int n = RaceTestSites(sites, 48);
+    for (int i = 0; i < n; ++i)
+        if (strcmp(sites[i]->name, name) == 0) return sites[i];
+    return nullptr;
+}
+
+// A real package: every site once in its module, at an offset this build knows, and in no other module (the bytes identify the
+// module too). The main menu's join check is in our fe_mainmenu build only: absent from the package's.
+static void TestSitesInPackage(const char* label, const char* path) {
+    printf("script sites: the %s package: every site once in its module, nowhere else\n", label);
+    size_t size = 0;
+    const uint8_t* pkg = LoadBytes(path, &size);
+    if (!pkg) { printf("FAIL: cannot read %s\n", path); ++g_fail; return; }
+    std::vector<PkgModule> mods = PackageModules(pkg, size);
+    CHECK(mods.size() == 59 && mods.size() == U32At(pkg + 12));  // every entry of the package parsed (59 modules in each of the three)
+    const ScriptSiteDef* sites[48];
+    int count = RaceTestSites(sites, 48);
+    CHECK(count == 29);
     for (int i = 0; i < count; ++i) {
-        const RaceTestSite& s = sites[i];
-        bool ok = (int)s.pc + s.from >= 0 && s.pc + s.from + s.size <= n && memcmp(module + s.pc + s.from, s.code, s.size) == 0;
-        if (!ok) printf("  %s at PC %#x: the module's bytes differ\n", s.name, s.pc);
-        CHECK(ok);
+        const ScriptSiteDef& s = *sites[i];
+        bool own = false;
+        for (const PkgModule& m : mods) {
+            uint32_t pc = RaceTestSitePc(m.bytes, s);
+            if (m.hash != s.module) {
+                if (pc) printf("  %s: also in module %08x at +%#x\n", s.name, m.hash, pc);
+                CHECK(pc == 0);
+                continue;
+            }
+            own = true;
+            if (s.module == 0xee8a2362) {  // fe_mainmenu: the join check (our native 7a1c) is in our build only
+                CHECK(pc == 0);
+                continue;
+            }
+            if (!pc || !KnownAt(s, pc)) printf("  %s: at +%#x in module %08x (this build knows +%#x)\n", s.name, pc, m.hash, s.known[0]);
+            CHECK(pc && KnownAt(s, pc));
+            CHECK(pc && memcmp(m.bytes + pc + s.from, s.code, s.n) == 0);
+        }
+        CHECK(own);
     }
 }
 
+// One module file: the listed sites at the given PC offsets, every other site absent.
+struct ExpectedSite { const char* name; uint32_t pc; };
+static const uint8_t* TestSitesInModule(const char* label, const char* path, const ExpectedSite* expected, int n, size_t* sizeOut = nullptr) {
+    printf("script sites: %s\n", label);
+    size_t size = 0;
+    const uint8_t* mod = LoadBytes(path, &size);
+    if (!mod) { printf("FAIL: cannot read %s\n", path); ++g_fail; return nullptr; }
+    CHECK(size > 0x50 && memcmp(mod, "smosbinL", 8) == 0 && U32At(mod + 8) <= size);
+    const ScriptSiteDef* sites[48];
+    int count = RaceTestSites(sites, 48);
+    for (int i = 0; i < count; ++i) {
+        const ScriptSiteDef& s = *sites[i];
+        uint32_t want = 0;
+        for (int k = 0; k < n; ++k)
+            if (strcmp(expected[k].name, s.name) == 0) want = expected[k].pc;
+        uint32_t pc = RaceTestSitePc(mod, s);
+        if (pc != want) printf("  %s: at +%#x, expected +%#x\n", s.name, pc, want);
+        CHECK(pc == want);
+        if (want) CHECK(memcmp(mod + pc + s.from, s.code, s.n) == 0);
+    }
+    if (sizeOut) *sizeOut = size;
+    return mod;
+}
+
+// Our built modules (menus\out): the `results` sites after 0x25e1 moved by the profile cursor's 12-byte insertion (the independent
+// check of m7zh found three that hadn't), the main menu's join check, the dialogs' OK path.
+static void TestOurModuleSites(const char* resultsPath) {
+    const ExpectedSite results[] = {{"results row (0912)", 0x422d + 12 + 8},   {"finish panel (0913)", 0x37ee + 12 + 8},
+                                    {"results list limit (0916)", 0x25e9 + 12 + 8}, {"results retry/quit menu (0916)", 0x22fd + 8},
+                                    {"RESULTS_START (1b03)", 0x1ade + 15},     {"results row name (1612)", 0x425b + 12 + 8}};
+    TestSitesInModule("our results module: every site where the build put it", resultsPath, results, 6);
+    char dir[MAX_PATH];
+    strcpy_s(dir, resultsPath);
+    char* slash = strrchr(dir, '\\');
+    if (!slash) slash = strrchr(dir, '/');
+    if (!slash) return;
+    slash[1] = 0;
+    char path[MAX_PATH];
+    const ExpectedSite menu[] = {{"main menu join check (7a1c)", 0x1c1a}};
+    sprintf_s(path, "%sfe_mainmenu.smosbin", dir);
+    TestSitesInModule("our fe_mainmenu: the join check", path, menu, 1);
+    const ExpectedSite dialogs[] = {{"dialogs OK path (0206)", 0x749 + 8}};
+    sprintf_s(path, "%sdialogs.smosbin", dir);
+    TestSitesInModule("our dialogs: the OK path", path, dialogs, 1);
+}
+
+// Modules another mod rebuilt in memory (reference\rebuilt-menus\README.md): the join check 27 bytes further down our fe_mainmenu,
+// front_main's return-key read where it was, Egg Hangar's hud with the three tag sites later than the stock's; and the sites'
+// users act from the found places.
+static void TestRebuiltModules(const char* dir) {
+    char path[MAX_PATH];
+    const ExpectedSite menu[] = {{"main menu join check (7a1c)", 0x1c35}};
+    sprintf_s(path, "%s\\fe_mainmenu.row-inserted.smosbin", dir);
+    const uint8_t* fe = TestSitesInModule("another mod's rebuilt fe_mainmenu: the join check moved 27 bytes down", path, menu, 1);
+    const ExpectedSite front[] = {{"front_main return key read (1b01)", 0x438 + 8}};
+    sprintf_s(path, "%s\\front_main.line-inserted.smosbin", dir);
+    const uint8_t* fm = TestSitesInModule("another mod's rebuilt front_main: the return-key read where it was", path, front, 1);
+    const ExpectedSite hud[] = {{"HUD tags gate (0938)", 0x36d4 + 8}, {"HUD tags human (0911)", 0x5b7f + 8}, {"HUD tag text (021f)", 0x5cc4 + 8}};
+    sprintf_s(path, "%s\\hud.egg-hangar.smosbin", dir);
+    TestSitesInModule("Egg Hangar's hud: the tag sites at their later places", path, hud, 3);
+    if (!fe || !fm) return;
+    printf("script sites: the users act from the found places (the rebuilt modules' bytes)\n");
+    // The update notice is posted from the join check at its new place, never from the old one.
+    RaceTestSetJoinAddresses((uintptr_t)&FakePostMessage, (uintptr_t)&FakeClear, (uintptr_t)&FakeClear, (uintptr_t)&FakeClear,
+                             (uintptr_t)&FakeBlackboard, (uintptr_t)&g_worldPaused, (uintptr_t)g_profiles);
+    *(uint32_t*)(g_arrayHelper + 4) = 0x29;
+    RaceTestSetDialogAddresses((uintptr_t)g_arrayHelper, (uintptr_t)&FakeArrayCreate, (uintptr_t)&FakeArraySet, (uintptr_t)&FakeRelease,
+                               (uintptr_t)g_none);
+    Reset();
+    g_posted.clear();
+    g_noticesShown.clear();
+    g_postOk = g_arrayOk = true;
+    g_snap = LobbySnapshot();
+    g_noticeApplied = true;
+    g_noticeReady = false;
+    auto DialogPosts = [&]() { int n = 0; for (const PostSeen& p : g_posted) if (p.target == 0x694fe697 && p.msg == 0xdfea0f93) ++n; return n; };
+    struct { void* vtable; uint8_t* pc; uint8_t* mod; } oldPlace = {nullptr, (uint8_t*)fe + 0x1c1a, (uint8_t*)fe},
+                                                           newPlace = {nullptr, (uint8_t*)fe + 0x1c35, (uint8_t*)fe};
+    Sleep(1600);  // (the notices come 1.5 s apart; an earlier test posted one)
+    RaceMainMenuJoinCheck(&oldPlace);
+    CHECK(DialogPosts() == 0 && g_noticesShown.empty());
+    RaceMainMenuJoinCheck(&newPlace);
+    CHECK(DialogPosts() == 1 && g_noticesShown.size() == 1 && g_noticesShown[0] == 2);
+    g_noticeApplied = false;
+    // After our race, front_main's read of the return key (at its place in the rebuilt module) gets the lobby.
+    RaceContract c = HostRunning();
+    NativeCall none = {};
+    NHook(kH090a)(nullptr, &none);
+    CHECK(RaceTestReturnFlag());
+    g_storedType = kTypeHash;
+    uint8_t t;
+    uint32_t v;
+    struct { void* vtable; uint8_t* pc; uint8_t* mod; } elsewhere = {nullptr, (uint8_t*)fm + 0x0500, (uint8_t*)fm},
+                                                           read = {nullptr, (uint8_t*)fm + 0x438 + 8, (uint8_t*)fm};
+    NativeCall d = Read1b01(&elsewhere, 0x72d1c72b, &t, &v);
+    CHECK(d.retValue == 0x906825eb && RaceTestReturnFlag());  // another read of the key: untouched
+    d = Read1b01(&read, 0x72d1c72b, &t, &v);
+    CHECK(d.retValue == 0xb0a0d459 && d.retType == kTypeHash && !RaceTestReturnFlag());
+    (void)c;
+    Reset();
+}
+
+// The rules, on made-up modules: the bytes once in the module's code, or the site is off (twice: ambiguous; absent; no module
+// header; the bytes cut by the code region's end); found wherever they lie; the answer kept per module until a header word changes.
+static void TestSiteRules() {
+    printf("script sites: a site is its bytes, once in the module's code; otherwise off\n");
+    const ScriptSiteDef* join = SiteNamed("main menu join check (7a1c)");
+    CHECK(join && join->n == 19 && join->from == -19 && join->known[0] == 0x1c1a);
+    if (!join) return;
+    static uint8_t twice[0x2000], none[0x2000], bare[0x2000], cut[0x2000], moved[0x2000];
+    FakeModule(twice, sizeof(twice));
+    memcpy(twice + 0x1c07, join->code, join->n);
+    memcpy(twice + 0x0c07, join->code, join->n);
+    CHECK(RaceTestSitePc(twice, *join) == 0);  // twice: ambiguous, off (logged once)
+    FakeModule(none, sizeof(none));
+    CHECK(RaceTestSitePc(none, *join) == 0);
+    memset(bare, 0, sizeof(bare));
+    memcpy(bare + 0x1c07, join->code, join->n);  // the bytes at the right place, but no module header
+    CHECK(RaceTestSitePc(bare, *join) == 0);
+    FakeModule(cut, sizeof(cut));
+    memcpy(cut + 0x1c07, join->code, join->n);
+    uint32_t len = 0x1c07 + 19 - 1 - 0x50;  // the code region ends one byte short of the site's last byte
+    memcpy(cut + 0x10, &len, 4);
+    CHECK(RaceTestSitePc(cut, *join) == 0);
+    len = 0x1c07 + 19 - 0x50;  // exactly covers it (another header word: looked at again)
+    memcpy(cut + 0x10, &len, 4);
+    CHECK(RaceTestSitePc(cut, *join) == 0x1c1a);
+    FakeModule(moved, sizeof(moved));
+    memcpy(moved + 0x0800, join->code, join->n);
+    CHECK(RaceTestSitePc(moved, *join) == 0x0813);  // found where it is (logged: not an offset this build knew)
+    memcpy(moved + 0x1000, join->code, join->n);    // a second copy added later: the kept answer stands (modules don't change after their parse)
+    CHECK(RaceTestSitePc(moved, *join) == 0x0813);
+    uint32_t shorter = sizeof(moved) - 0x50 - 4;  // until a header word changes (the code length, still covering both): looked at again, now ambiguous
+    memcpy(moved + 0x10, &shorter, 4);
+    CHECK(RaceTestSitePc(moved, *join) == 0);
+    uint32_t bad = sizeof(moved) - 8;  // a header that no longer adds up (the code region past the size): not a module
+    memcpy(moved + 8, &bad, 4);
+    CHECK(RaceTestSitePc(moved, *join) == 0);
+    // More modules than the table holds (320): the oldest records are reused and a module seen again is simply searched again.
+    static uint8_t many[330][0x100];
+    bool all = true;
+    for (int i = 0; i < 330; ++i) {
+        FakeModule(many[i], sizeof(many[i]));
+        memcpy(many[i] + 0x60, join->code, join->n);
+        all = all && RaceTestSitePc(many[i], *join) == 0x60 + 19;
+    }
+    CHECK(all);
+    CHECK(RaceTestSitePc(many[0], *join) == 0x60 + 19 && RaceTestSitePc(many[329], *join) == 0x60 + 19);
+    // The site's user sees the same: no notice from the ambiguous module, one from the moved site.
+    RaceTestSetJoinAddresses((uintptr_t)&FakePostMessage, (uintptr_t)&FakeClear, (uintptr_t)&FakeClear, (uintptr_t)&FakeClear,
+                             (uintptr_t)&FakeBlackboard, (uintptr_t)&g_worldPaused, (uintptr_t)g_profiles);
+    *(uint32_t*)(g_arrayHelper + 4) = 0x29;
+    RaceTestSetDialogAddresses((uintptr_t)g_arrayHelper, (uintptr_t)&FakeArrayCreate, (uintptr_t)&FakeArraySet, (uintptr_t)&FakeRelease,
+                               (uintptr_t)g_none);
+    Reset();
+    g_posted.clear();
+    g_noticesShown.clear();
+    g_postOk = g_arrayOk = true;
+    g_snap = LobbySnapshot();
+    g_noticeApplied = false;
+    g_noticeReady = true;
+    auto DialogPosts = [&]() { int n = 0; for (const PostSeen& p : g_posted) if (p.target == 0x694fe697 && p.msg == 0xdfea0f93) ++n; return n; };
+    static uint8_t one[0x2000];
+    FakeModule(one, sizeof(one));
+    memcpy(one + 0x0800, join->code, join->n);
+    struct { void* vtable; uint8_t* pc; uint8_t* mod; } ambiguous = {nullptr, twice + 0x1c1a, twice}, found = {nullptr, one + 0x0813, one},
+                                                           oldPlace = {nullptr, one + 0x1c1a, one};
+    Sleep(1600);  // (the notices come 1.5 s apart)
+    RaceMainMenuJoinCheck(&ambiguous);
+    RaceMainMenuJoinCheck(&oldPlace);
+    CHECK(DialogPosts() == 0 && g_noticesShown.empty());
+    RaceMainMenuJoinCheck(&found);
+    CHECK(DialogPosts() == 1 && g_noticesShown.size() == 1 && g_noticesShown[0] == 1);
+    g_noticeReady = false;
+}
+
+// ---------------------------------------------------------------- the race clock on real time
+// The main loop's step timer as 0x4a05f0 / 0x4967c0 / 0x4a0710 keep it (re\race-clock\FINDINGS.md): the app's frame time
+// (+0xc, ms), the accumulator (ms), every step's count, this frame's steps (at most 4).
+static uint8_t g_appMem[0x20];
+static void* g_appPtr = g_appMem;
+static float g_stepAcc = 0;
+static uint32_t g_stepCount = 900;
+static int32_t g_frameSteps = 0;
+
+// One frame of `ms`: the steps it is due (20 ms each, at most 4 run, the rest dropped), each running `hook` (the race clock
+// +1 in a Racing step, as 0x4cbb90 does inside it), then the step counters. `foreignFirst`: the frame's first step runs
+// another state's update (not ours).
+static void Frame(uint32_t ms, int hook, bool foreignFirst = false) {
+    *(uint32_t*)(g_appMem + 0xc) += ms;
+    float acc = g_stepAcc + (float)ms;
+    int32_t n = (int32_t)(acc / 20.0f);
+    g_stepAcc = acc - n * 20.0f;
+    g_frameSteps = n > 4 ? 4 : n;
+    for (int i = 0; i < g_frameSteps; ++i) {
+        if (!(foreignFirst && i == 0)) {
+            UHook(hook)(nullptr, nullptr);
+            if (hook == kHRacing) ++g_raceClock;
+        }
+        ++g_stepCount;
+        ++g_tick;
+    }
+}
+
+static void TestRealTimeClock() {
+    printf("race clock on real time\n");
+    uint32_t keep = g_raceClock;
+    Reset();
+    g_stepAcc = 0;
+    Lobby(A, true, 0, 1);
+    CHECK(RaceHostStart() == kStartOk);
+    RaceContract c = {};
+    CHECK(DecodeContract(g_sent[0].data, g_sent[0].size, c));
+    RaceLaunched(true);
+    Script0905(0x1, "STATE_Control_StartingGridHuman", 4);
+    for (int k = 1; k < 8; ++k) Script0905(0x2, "STATE_Control_StartingGridAI", 0);
+    UHook(kHSetup)(nullptr, nullptr);
+    g_scene[0x1100] = 8;
+    uint8_t buf[kWireMax];
+    UHook(kHWaiting)(nullptr, nullptr);
+    Deliver(B, buf, EncodeLoaded(c.race, kStageLoaded, 1, buf, sizeof(buf)));
+    UHook(kHWaiting)(nullptr, nullptr);
+    // Hold B: frames go on while the countdown is held; time dropped here (before the release) doesn't count.
+    for (int i = 0; i < 5; ++i) Frame(20, kHCountdown);
+    Frame(500, kHCountdown);  // 25 steps due, 4 run
+    for (int i = 0; i < 3; ++i) Frame(20, kHCountdown);
+    CHECK(RaceTestPhase() == kHoldB);
+    Deliver(B, buf, EncodeLoaded(c.race, kStageCountdown, 1, buf, sizeof(buf)));
+    Frame(20, kHCountdown);
+    CHECK(RaceTestPhase() == kRunning);
+    // The countdown: time dropped there counts (this PC's GO came that much later in real time).
+    for (int i = 0; i < 20; ++i) Frame(20, kHCountdown);
+    Frame(200, kHCountdown);  // 10 due, 4 run: 120 ms dropped
+    for (int i = 0; i < 20; ++i) Frame(20, kHCountdown);
+    g_raceClock = 0;  // (the clock starts at the first Racing step)
+    Frame(20, kHRacing);
+    CHECK(g_raceClock == 6 + 1);  // the 6 ticks dropped, then the step's own
+    for (int i = 0; i < 50; ++i) Frame(20, kHRacing);
+    CHECK(g_raceClock == 7 + 50);  // keeping up: nothing added
+    // Long frames in the race: each one's dropped ticks come back at its own first step (the frame's step count is the capped one).
+    for (int i = 0; i < 5; ++i) Frame(120, kHRacing);  // 6 due, 4 run: 2 dropped each
+    CHECK(g_raceClock == 57 + 5 * (2 + 4));
+    Frame(20, kHRacing);
+    CHECK(g_raceClock == 57 + 5 * 6 + 1);
+    uint32_t real = 57 + 5 * 6 + 1;  // the steps real time was due since the first Racing step's frame
+    CHECK(g_raceClock == real);
+    // A frame whose first step runs another state's update: its dropped time isn't read then, but at the next frame start.
+    Frame(120, kHRacing, true);
+    CHECK(g_raceClock == real + 3);
+    Frame(20, kHRacing);
+    CHECK(g_raceClock == real + 3 + 2 + 1);
+    // Several seconds frozen (a lost device, a stall): all of it comes back.
+    Frame(3000, kHRacing);
+    Frame(20, kHRacing);
+    CHECK(g_raceClock == real + 6 + 150 + 1);
+    // After the race end the clock is left alone.
+    g_raceOver = 1;
+    uint32_t before = g_raceClock;
+    Frame(300, kHRacing);
+    Frame(20, kHRacing);
+    CHECK(g_raceClock == before + 4 + 1);
+    g_raceOver = 0;
+    NativeCall td = {};
+    NHook(kH090a)(nullptr, &td);
+
+    // The other player is already at the countdown: ours is released at its very first step. The intros' steps were seen,
+    // so the release has its base at once, and a long frame right after it counts.
+    Reset();
+    g_stepAcc = 0;
+    Lobby(A, true, 0, 1);
+    CHECK(RaceHostStart() == kStartOk);
+    CHECK(DecodeContract(g_sent[0].data, g_sent[0].size, c));
+    RaceLaunched(true);
+    Script0905(0x1, "STATE_Control_StartingGridHuman", 4);
+    for (int k = 1; k < 8; ++k) Script0905(0x2, "STATE_Control_StartingGridAI", 0);
+    UHook(kHSetup)(nullptr, nullptr);
+    g_scene[0x1100] = 8;
+    UHook(kHWaiting)(nullptr, nullptr);
+    Deliver(B, buf, EncodeLoaded(c.race, kStageLoaded, 1, buf, sizeof(buf)));
+    UHook(kHWaiting)(nullptr, nullptr);
+    CHECK(RaceTestPhase() == kIntros);
+    for (int i = 0; i < 5; ++i) Frame(20, kHCharIntro);
+    Deliver(B, buf, EncodeLoaded(c.race, kStageCountdown, 1, buf, sizeof(buf)));
+    Frame(20, kHCountdown);
+    CHECK(RaceTestPhase() == kRunning);
+    Frame(200, kHCountdown);  // 6 dropped, in the frame right after the release
+    g_raceClock = 0;
+    Frame(20, kHRacing);
+    CHECK(g_raceClock == 6 + 1);
+    NHook(kH090a)(nullptr, &td);
+    g_raceClock = keep;
+}
+
 int main(int argc, char** argv) {
+    RaceTestSetClockAddresses((uintptr_t)&g_appPtr, (uintptr_t)&g_stepAcc, (uintptr_t)&g_stepCount, (uintptr_t)&g_frameSteps,
+                              (uintptr_t)&g_raceClock);
     RaceTestSetAddresses((uintptr_t)&g_scenePtr, (uintptr_t)&g_courseGraph, (uintptr_t)&FakeSeed, (uintptr_t)&FakeSetState,
                          (uintptr_t)&FakeSetPosition, (uintptr_t)&g_tick, (uintptr_t)&g_racerTypeId);
     RaceTestSetOriginal(kH0905, (void*)&Fake0905);
@@ -6684,6 +7157,7 @@ int main(int argc, char** argv) {
     TestOtherFinishesFirst();
     TestLateAndGone();
     TestTimeout();
+    TestRealTimeClock();
     TestPlayersDnf();
     TestRecordFinishAndRetry();
     TestBadges();
@@ -6695,6 +7169,7 @@ int main(int argc, char** argv) {
     TestReturnToLobby();
     TestJoinLeavesRace();
     TestSessionDialogs();
+    TestUpdateNotices();
     TestToasts();
     TestProgress();
     TestHostRules();
@@ -6726,7 +7201,14 @@ int main(int argc, char** argv) {
     TestVoiceMirror();
     TestItemLines();
     TestProfileCursor();
-    if (argc > 1) TestResultsModuleSites(argv[1]);
+    // Arguments: menus\out\results.smosbin (fe_mainmenu / dialogs beside it); the stock, Roster Pack and Metal Sonic 1.1.2
+    // FrontEndScripts.sbn; reference\rebuilt-menus.
+    TestSiteRules();
+    if (argc > 1) TestOurModuleSites(argv[1]);
+    if (argc > 2) TestSitesInPackage("stock", argv[2]);
+    if (argc > 3) TestSitesInPackage("Roster Pack", argv[3]);
+    if (argc > 4) TestSitesInPackage("Metal Sonic 1.1.2", argv[4]);
+    if (argc > 5) TestRebuiltModules(argv[5]);
     printf("race bridge: %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

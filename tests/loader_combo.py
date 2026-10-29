@@ -26,8 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import xpac  # noqa: E402
 
-MODS = xpac.GAME / "mods"
-METAL = MODS / "Metal Sonic (Roster Pack)"
+MODS = Path(os.environ["ASR_MODS"]) if os.environ.get("ASR_MODS") else xpac.GAME / "mods"  # (ASR_MODS: another mods folder to read, e.g. while another test has moved the live one aside)
+METAL = MODS / "Metal Sonic (Roster Pack)"  # or the folder given as the 4th argument (a Metal Sonic package, e.g. 1.1.3 or 1.1.4)
 # The members Metal Sonic changes too, each with our variant: 7 navigator scenes (key pictures), 7 lobby scenes (M8: the yellow
 # bar, 1.0.0: Egg Hangar's card), 5 dialogs text tables (VIEW STEAM PROFILE, UNMUTE) and 7 Settings popup scenes (1.0.0: Egg
 # Hangar's name).
@@ -137,7 +137,12 @@ def read_back(g: Path) -> tuple[dict, Path]:
 
 def main() -> int:
     """Run the cases; 0 when every check passed."""
+    global METAL
     loader, prev, work = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+    if len(sys.argv) > 4:
+        METAL = Path(sys.argv[4])
+    metal_desc = (METAL / "allstars-mod.json").read_bytes() if (METAL / "allstars-mod.json").exists() else None
+    print(f"Metal Sonic: {METAL}")
     stand_in = loader / "fixture_game.exe"
     work.mkdir(parents=True, exist_ok=True)
     archive = work / "SumoToolResources.xpac"
@@ -155,8 +160,13 @@ def main() -> int:
     variant_ops = {op["key"]: op for op in ours_ops if op.get("variants")}
     check(len(variant_ops) == SHARED and all(op.get("optional") is True for op in variant_ops.values()), f"our plan: {SHARED} optional operations with variants")
     metal_by_key = {op["key"]: op for op in metal_group["operations"]}
-    check(all(op["variants"][0]["over_payload_sha256"] == metal_by_key[k]["payload_sha256"] for k, op in variant_ops.items()),
-          "each variant is made for the installed Metal Sonic's payload of that member")
+
+    def variant_for(op: dict, metal_op: dict):
+        """Our variant made over this Metal Sonic's payload of the member (one per Metal version that differs), or None."""
+        return next((v for v in op["variants"] if v["over_payload_sha256"] == metal_op["payload_sha256"]), None)
+
+    check(all(variant_for(op, metal_by_key[k]) is not None for k, op in variant_ops.items()),
+          "each variant is made for this Metal Sonic's payload of that member")
 
     def expect(*layers: tuple[dict, Path]) -> dict:
         """{key: bytes} of the changed members, later layers winning."""
@@ -175,13 +185,13 @@ def main() -> int:
 
     # (a) 1.2.0, Metal Sonic + this mod
     g = new_game(work, "a-metal-and-ours", loader, archive)
-    write_mod(g, "Metal Sonic (Roster Pack)", "metal-sonic", metal_only, METAL, (METAL / "allstars-mod.json").read_bytes(), loader)
+    write_mod(g, "Metal Sonic (Roster Pack)", "metal-sonic", metal_only, METAL, metal_desc, loader)
     write_mod(g, "Steam Multiplayer", "steam-multiplayer", ours_plan, OURS, ours_desc, loader)
     r = start(g, stand_in)
     check(r["hr"] == 0 and not r["dialogs"], f"(a) 1.2.0 with Metal Sonic starts without a message (hr {r['hr']:#x}, {len(r['dialogs'])} message(s))")
     want = expect((metal_group["operations"], g / "mods" / "Metal Sonic (Roster Pack)"), ([op for op in ours_ops if not op.get("variants")], OURS))
     for k, op in variant_ops.items():
-        want[int(k, 16)] = (OURS / op["variants"][0]["payload"]).read_bytes()
+        want[int(k, 16)] = (OURS / variant_for(op, metal_by_key[k])["payload"]).read_bytes()
     compare(g, want, "(a)")
     check(r["log"].count("steam-multiplayer's version made for metal-sonic's change is used") == SHARED, f"(a) the log names the {SHARED} combined members")
 
@@ -214,13 +224,13 @@ def main() -> int:
     want = expect((mg["operations"], md), ([o for o in ours_ops if not o.get("variants")], OURS))
     for k, o in variant_ops.items():
         if k != "0720C59E":
-            want[int(k, 16)] = (OURS / o["variants"][0]["payload"]).read_bytes()
+            want[int(k, 16)] = (OURS / variant_for(o, metal_by_key[k])["payload"]).read_bytes()
     compare(g, want, "(c)")
     check("member 0720C59E: steam-multiplayer's optional change is skipped; metal-sonic's is used" in r["log"], "(c) the log says which change gave way")
 
     # (d) 1.1.0, Metal Sonic + this mod: the player is told to update the loader
     g = new_game(work, "d-prev-release", prev, archive)
-    write_mod(g, "Metal Sonic (Roster Pack)", "metal-sonic", metal_only, METAL, (METAL / "allstars-mod.json").read_bytes(), prev)
+    write_mod(g, "Metal Sonic (Roster Pack)", "metal-sonic", metal_only, METAL, metal_desc, prev)
     write_mod(g, "Steam Multiplayer", "steam-multiplayer", ours_plan, OURS, ours_desc, prev)
     r = start(g, stand_in, "v2-host-release")
     text = r["dialogs"][0]["text"] if r["dialogs"] else ""
@@ -234,14 +244,14 @@ def main() -> int:
     egg_group = next(g for g in json.loads((egg / "plan.json").read_text(encoding="utf-8"))["archive_groups"] if g["path"] == xpac.ARCHIVE)
     g = new_game(work, "f-egg-metal-ours", loader, archive)
     write_mod(g, "Egg Hangar", "egg-hangar", {"schema": 1, "archive_groups": [egg_group]}, egg, (egg / "allstars-mod.json").read_bytes(), loader)
-    write_mod(g, "Metal Sonic (Roster Pack)", "metal-sonic", metal_only, METAL, (METAL / "allstars-mod.json").read_bytes(), loader)
+    write_mod(g, "Metal Sonic (Roster Pack)", "metal-sonic", metal_only, METAL, metal_desc, loader)
     write_mod(g, "Steam Multiplayer", "steam-multiplayer", ours_plan, OURS, ours_desc, loader)
     r = start(g, stand_in)
     check(r["hr"] == 0 and not r["dialogs"], "(f) 1.2.0 with Egg Hangar and Metal Sonic starts without a message")
     want = expect((egg_group["operations"], g / "mods" / "Egg Hangar"), (metal_group["operations"], g / "mods" / "Metal Sonic (Roster Pack)"),
                   ([op for op in ours_ops if not op.get("variants")], OURS))
     for k, op in variant_ops.items():
-        want[int(k, 16)] = (OURS / op["variants"][0]["payload"]).read_bytes()
+        want[int(k, 16)] = (OURS / variant_for(op, metal_by_key[k])["payload"]).read_bytes()
     # Egg Hangar 1.2.0-menus.1 (installed 2026-10-23) carries variants of its own over Metal Sonic's members: where its variant
     # is made for Metal's payload, that variant is the member (Egg Hangar's change on top of Metal's).
     egg_variants = 0

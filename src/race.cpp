@@ -28,6 +28,7 @@
 #include "steer.h"
 #include "script_abi.h"
 #include "race_tables.h"
+#include "update.h"
 
 namespace {
 
@@ -55,6 +56,13 @@ GAME_ADDRESS kStartEndTimer = 0x4ccf40;    // cdecl(seconds): start the race-end
 GAME_ADDRESS kEndTimerElapsed = 0xcf7a8c;  // that timer's elapsed ticks (+1 per tick in 0x4cbbb0, called by 0x5b2250)
 GAME_ADDRESS kEndTimerLimit = 0xcf7a90;    // and its length; the race ends once elapsed >= length (0x4cdd1f)
 GAME_ADDRESS kTickRate = 0xc2a020;         // sim ticks per second
+// The race clock on real time (re\race-clock\FINDINGS.md): the frame's time, the step accumulator, every step's count and
+// this frame's (capped) step count, as the main loop's step timer 0x4a05f0 / 0x4a0710 keeps them.
+GAME_ADDRESS kAppPtr = 0xc2a1b4;           // [kAppPtr] = the app object: +0xc the frame's timeGetTime (ms)
+GAME_ADDRESS kStepAcc = 0xc2a000;          // float: ms left in the step accumulator (0..20), set once per frame
+GAME_ADDRESS kStepCount = 0xc2a004;        // every sim step, paused or not: +1 at each step's end
+GAME_ADDRESS kFrameSteps = 0x6ec868;       // the steps this frame runs (at most 4: the rest of a long frame is dropped)
+const uint32_t kAppFrameTime = 0xc;
 // The host's rules (notes/RULES.md): the profiles' race settings, 4 records of 0xac bytes, saved with the
 // profile; the active one is [kActiveProfile]. +0xc items (0 none, 1 no All-Star, 2 all, read live at
 // every item roll), +0x10 hazards (byte, read when the course loads).
@@ -467,6 +475,7 @@ bool g_installed = false;
 bool g_gateHooks = false;       // the gate All-Stars' group is installed
 bool g_steerHooks = false;      // the Drift+ group is installed
 bool g_forceDriftPlusOff = false;  // config.ini [Debug] ForceDriftPlusOff: as host, Drift+ off without a keyboard player
+uint32_t g_debugStallMs = 0;       // config.ini [Debug] StallMs: freeze this game once, 10 s into each online race (a stutter to test)
 bool g_announcerHooks = false;  // the announcer group is installed
 bool g_fairHooks = false;       // the fair call-outs group is installed
 bool g_lineHooks = false;       // the fair item lines group is installed
@@ -696,8 +705,16 @@ struct Race {
     Car cars[kGridSlots];
     bool remote[kGridSlots] = {};   // this game writes car k's pose from the network
     bool racing = false;            // the race clock runs (a Racing or WaitingForFinishers update ran)
+    // The race clock on real time (ClockObserve / ClockCatchUp): the frame last seen (its time, the step count then) and the
+    // first one's (the bases), the dropped time D (ms) at the last frame start seen and at the countdown's release, the
+    // ticks added to the race clock since; for the log: the catch-ups, the largest, lines written.
+    bool clockSeen = false, clockValid = false, clockBase = false, clockBroken = false, clockStalled = false;
+    uint32_t clockT = 0, clockStep = 0, clockT0 = 0, clockStep0 = 0;
+    double clockD = 0, clockD0 = 0;
+    uint32_t clockAdded = 0, clockBiggest = 0;
+    int clockFixes = 0, clockLogged = 0;
     char names[kMaxHumans][32] = {};  // the humans' Steam names (lobby at Arm), for the HUD's tags
-    bool tagLogged[4] = {};           // the tags' log lines, once per race: gate, car, name, unknown label
+    bool tagLogged[5] = {};           // the tags' log lines, once per race: gate, car, name, unknown label, a computer racer's name
     // Exhaust effects: the owner's flame serial per car it sends; the mode each received car shows and the
     // local tick its flame last fired again (HookExhaust).
     uint8_t fxSerial[kGridSlots] = {};
@@ -868,6 +885,7 @@ void RestoreRules(const wchar_t* when) {
 }
 
 bool RaceOver();
+double StepMs();
 
 // Guest: the AI that followed the host's game drive themselves again (the host left, or the race goes
 // on offline): the AI state for the race (or the grid before GO), as the console's message 6 did.
@@ -1546,6 +1564,13 @@ const char* RacerName(int k) {
     return "?";
 }
 
+// The racer's menu name ("AMIGO", "BEAT"), for the computer racers' HUD tags.
+const char* RacerDisplayName(int k) {
+    for (int i = 0; g_racerList && i < g_racerCount; ++i)
+        if (g_racerList[i].hash == g.c.roster[k]) return g_racerList[i].display;
+    return nullptr;
+}
+
 const wchar_t* Who(int k) { return k == g.local ? L", you" : k < g.c.humanCount ? L", other player" : L""; }
 
 // Our car has finished: tell the others its time (once; any reason, so the estimate this game makes
@@ -1571,7 +1596,7 @@ void SendOwnFinish() {
         return;
     }
     g.finishSent = true;
-    Log(false, L"race: you finished: %s (reason %u); told the others", t, reason);
+    Log(false, L"race: you finished: %s (reason %u); told the others (the race clock caught up %.0f ms here)", t, reason, g.clockAdded * StepMs());
 }
 
 // Car k gets a result measured elsewhere, as the console's network handler for a finish did
@@ -1871,6 +1896,7 @@ const char* StringArg(const NativeCall* d, uint32_t i) {
 // sent it one local human (at our creation index) and AI everywhere else. Call k becomes roster
 // entry k: our human as the script made it, the other humans as network racers, the AI as given.
 void __cdecl Hook0905(void* vm, NativeCall* d) {
+    LobbyNoteRaceStart();  // (any race: the Steam worker gathers the friend figures once for it)
     NativeFn original = Original<NativeFn>(kH0905);
     if (g.phase == kArmed && g.launched && GetTickCount() - g.launchedAt > 20000) {
         Log(true, L"online race %08x: the race did not start within 20 s of the lobby's start; dropped", g.c.race);
@@ -1928,6 +1954,137 @@ void __cdecl Hook0900(void* vm, NativeCall* d) {
     Original<NativeFn>(kH0900)(vm, d);
 }
 
+// ---------------------------------------------------------------- script call sites
+// Every script site this file checks (ScriptSiteDef, race.h) is found by its bytes, not by a fixed offset (1.1.1-dp13: another
+// mod may rebuild a module in memory with a row or a line inserted before a site; the bytes stay, the offset moves; until then
+// such a mod kept its whole feature off while this DLL was loaded). The bound module (VM+8, a relocated "smosbinL": +8 size, +0xc
+// code offset, +0x10 code length, notes/SCRIPT-LOADER.md) is searched once per site and the answer kept per module: the PC
+// offset where the bytes occur exactly once in its code, or 0 (absent: another module, or the bytes changed; or more than once:
+// ambiguous, the site is off there, logged once). Each pattern was checked to occur once in its module and in no other module
+// of the stock, Roster Pack and Metal Sonic 1.1.2 packages (tests/test_race.cpp runs that check on the real packages): the
+// bytes identify the module as well as the site, as the offset-and-bytes check did. Script thread only.
+const uint32_t kScriptResults = 0x8a972456, kScriptPauseMenu = 0x791427eb, kScriptFrontMain = 0x01d0bc8b, kScriptBridge = 0x44c833f0,
+               kScriptHud = 0x96930381, kScriptGame = 0xbed107e7, kScriptDialogs = 0x694fe697, kScriptMainMenu = 0xee8a2362;
+const int kMaxSites = 48, kMaxSiteModules = 320;
+const uint32_t kSiteModuleMax = 0x1000000, kSiteHeader = 0x50;
+
+struct ModuleSites {
+    const uint8_t* module;
+    uint32_t size, codeStart, codeLen, ident;  // the header words at the first look (another module at the same address: looked at again)
+    uint64_t resolved;                          // bit i: pc[i] is known
+    uint32_t pc[kMaxSites];                     // site i's PC offset in this module, or 0
+};
+const ScriptSiteDef* g_sites[kMaxSites];  // every site seen, by address (its index is its bit above)
+int g_siteCount = 0;
+ModuleSites g_siteModules[kMaxSiteModules];
+int g_siteModuleCount = 0, g_siteLastModule = 0;
+unsigned g_siteModuleNext = 0;  // the next record to reuse once the table is full (round robin)
+bool g_siteListFullLogged = false, g_siteTableFullLogged = false;
+
+uint32_t SiteU32(const uint8_t* p) {
+    uint32_t v;
+    memcpy(&v, p, 4);
+    return v;
+}
+
+bool KnownSiteOffset(const ScriptSiteDef& s, uint32_t pc) {
+    for (uint32_t k : s.known)
+        if (k && k == pc) return true;
+    return false;
+}
+
+// The site's PC offset in the module's code (the header words given), or 0; logs what a reader of the mod log should know.
+uint32_t SearchSite(const uint8_t* mod, uint32_t codeStart, uint32_t codeLen, const ScriptSiteDef& s) {
+    if (!s.code || s.n == 0 || s.n > codeLen) return 0;
+    const uint8_t* p = mod + codeStart;
+    const uint8_t* last = mod + codeStart + codeLen - s.n;  // the last place the bytes could start
+    uint32_t found = 0;
+    int count = 0;
+    while (p <= last) {
+        p = (const uint8_t*)memchr(p, s.code[0], (size_t)(last - p) + 1);
+        if (!p) break;
+        if (memcmp(p, s.code, s.n) == 0) {
+            if (++count > 1) break;
+            found = (uint32_t)(p - mod);
+        }
+        ++p;
+    }
+    if (count > 1) {
+        Log(true, L"script site %hs: its bytes occur more than once in the bound module (%u bytes): the site is off there", s.name,
+            codeStart + codeLen);
+        return 0;
+    }
+    if (count == 0 || (int64_t)found - s.from <= 0) return 0;
+    uint32_t pc = (uint32_t)((int64_t)found - s.from);
+    if (!KnownSiteOffset(s, pc))
+        Log(true, L"script site %hs: found at +0x%x (this build knew +0x%x; another mod rebuilt the module)", s.name, pc, s.known[0]);
+    return pc;
+}
+
+// The site's index in g_sites (its bit in every module's record), or -1 when the list is full (resolved without the cache).
+int SiteIndex(const ScriptSiteDef& s) {
+    for (int i = 0; i < g_siteCount; ++i)
+        if (g_sites[i] == &s) return i;
+    if (g_siteCount >= kMaxSites) {
+        if (!g_siteListFullLogged) Log(true, L"script sites: more than %d sites; the rest are searched on every call", kMaxSites);
+        g_siteListFullLogged = true;
+        return -1;
+    }
+    g_sites[g_siteCount] = &s;
+    return g_siteCount++;
+}
+
+// The site's PC offset in `mod`, or 0 (not a module, or the site isn't there once).
+uint32_t SitePc(const uint8_t* mod, const ScriptSiteDef& s) {
+    if (memcmp(mod, "smosbinL", 8) != 0) return 0;
+    uint32_t size = SiteU32(mod + 8), codeStart = SiteU32(mod + 0xc), codeLen = SiteU32(mod + 0x10), ident = SiteU32(mod + 0x24);
+    if (size < kSiteHeader || size > kSiteModuleMax || codeStart < kSiteHeader || codeStart > size || codeLen > size - codeStart) return 0;
+    int index = SiteIndex(s);
+    if (index < 0) return SearchSite(mod, codeStart, codeLen, s);
+    ModuleSites* m = nullptr;
+    if (g_siteLastModule < g_siteModuleCount && g_siteModules[g_siteLastModule].module == mod) m = &g_siteModules[g_siteLastModule];
+    for (int i = 0; i < g_siteModuleCount && !m; ++i)
+        if (g_siteModules[i].module == mod) m = &g_siteModules[g_siteLastModule = i];
+    if (m && (m->size != size || m->codeStart != codeStart || m->codeLen != codeLen || m->ident != ident)) {  // another module here now
+        m->size = size;
+        m->codeStart = codeStart;
+        m->codeLen = codeLen;
+        m->ident = ident;
+        m->resolved = 0;
+    }
+    if (!m) {
+        if (g_siteModuleCount >= kMaxSiteModules) {  // full: the oldest record is reused (its module is searched again if seen again)
+            if (!g_siteTableFullLogged) Log(true, L"script sites: more than %d script modules seen; the oldest answers are dropped", kMaxSiteModules);
+            g_siteTableFullLogged = true;
+            m = &g_siteModules[g_siteLastModule = g_siteModuleNext++ % kMaxSiteModules];
+        } else {
+            m = &g_siteModules[g_siteLastModule = g_siteModuleCount++];
+        }
+        m->module = mod;
+        m->size = size;
+        m->codeStart = codeStart;
+        m->codeLen = codeLen;
+        m->ident = ident;
+        m->resolved = 0;
+    }
+    uint64_t bit = 1ull << index;
+    if (!(m->resolved & bit)) {
+        m->pc[index] = SearchSite(mod, codeStart, codeLen, s);
+        m->resolved |= bit;
+    }
+    return m->pc[index];
+}
+
+// The native was called from site `s` of its script (VM+4 PC, just past the call; VM+8 module): the site's bytes are at PC + from,
+// and that is the one place they occur in the bound module's code.
+bool ScriptSite(void* vm, const ScriptSiteDef& s) {
+    const uint8_t* pc = *(const uint8_t* const*)((uint8_t*)vm + 4);
+    const uint8_t* mod = *(const uint8_t* const*)((uint8_t*)vm + 8);
+    if (!pc || !mod || pc <= mod) return false;
+    uint32_t at = SitePc(mod, s);
+    return at && (uintptr_t)(pc - mod) == at && !memcmp(pc + s.from, s.code, s.n);
+}
+
 // 090a tears the race down (back to the menus).
 // The results screen's row loop (module `results`, 0912(position) at offset 0x422d) reads each car's
 // human number once (0x58d9fa) for its "nP" badge. Each game numbers only its own player (0, "1P");
@@ -1935,21 +2092,15 @@ void __cdecl Hook0900(void* vm, NativeCall* d) {
 // slot instead (host 1P, guest 2P), the same on every screen. Only at that call site: the same native
 // also decides the profile's race-win stat (`results` 0x53ce), which must see the real numbers.
 // Our `results` module (script_subst.cpp; tools\build_menus.py results_with_profile) has 12 bytes inserted at 0x25e1: every site
-// of that module after 0x25e1 lies kResultsInsert bytes further than in the stock module (the stock module isn't loaded with
-// our menus; without them none of these sites runs). tests/test_race.cpp checks every site against the built module.
+// of that module after 0x25e1 lies kResultsInsert bytes further than in the stock module; the stock offsets are known too (the
+// same bytes), though the stock module isn't loaded with our menus, and without them no online race runs these sites.
+// tests/test_race.cpp checks every site against the built module.
 const uint32_t kResultsInsert = 12;
-const uint32_t kResultsRowPc = 0x422d + kResultsInsert + 8;  // the interpreter has moved the PC past the 8-byte call
 const uint8_t kResultsRowCode[] = {0x32, 0x01, 0x12, 0x09, 0x00, 0x00, 0x96, 0x09, 0x07, 0x01, 0x31, 0x4b, 0x14};
+const ScriptSiteDef kResultsRow = {"results row (0912)", kScriptResults, -8, kResultsRowCode, sizeof(kResultsRowCode),
+                                   {0x422d + kResultsInsert + 8, 0x422d + 8}};  // the interpreter has moved the PC past the 8-byte call
 
-// The native was called from `pcOffset` in its module (VM+4 PC, just past the call; VM+8 module), and
-// the module's bytes from PC + `from` are `code`: one known call site of a known script.
-bool ScriptSite(void* vm, uint32_t pcOffset, int from, const uint8_t* code, size_t n) {
-    const uint8_t* pc = *(const uint8_t* const*)((uint8_t*)vm + 4);
-    const uint8_t* mod = *(const uint8_t* const*)((uint8_t*)vm + 8);
-    return pc && mod && pc > mod && (uintptr_t)(pc - mod) == pcOffset && (int)pcOffset + from >= 0 && !memcmp(pc + from, code, n);
-}
-
-bool ResultsRowCall(void* vm) { return ScriptSite(vm, kResultsRowPc, -8, kResultsRowCode, sizeof(kResultsRowCode)); }
+bool ResultsRowCall(void* vm) { return ScriptSite(vm, kResultsRow); }
 
 void __cdecl Hook0912(void* vm, NativeCall* d) {
     NativeFn original = Original<NativeFn>(kH0912);
@@ -1978,12 +2129,13 @@ void __cdecl Hook0912(void* vm, NativeCall* d) {
 // asks 0913 for the results row of creation index 0 (`INT8 0; NAT 0913` at 0x37ec) for its golden place,
 // portrait and name: our player on the host, but the host's car on a guest (re\m5-finishbanner). There
 // it gets our own index. 0913 (0x58ded0) maps its argument by creation index and bounds-checks it.
-const uint32_t kFinishPanelPc = 0x37ee + kResultsInsert + 8;
 const uint8_t kFinishPanelCode[] = {0x51, 0x00, 0x32, 0x01, 0x13, 0x09, 0x00, 0x00, 0xd8, 0x07, 0x07, 0x01, 0x51, 0x00, 0x23};
+const ScriptSiteDef kFinishPanel = {"finish panel (0913)", kScriptResults, -10, kFinishPanelCode, sizeof(kFinishPanelCode),
+                                    {0x37ee + kResultsInsert + 8, 0x37ee + 8}};
 
 void __cdecl Hook0913(void* vm, NativeCall* d) {
     if (g.phase == kRunning && g.local > 0 && vm && d->argc == 1 && d->types[0] == kTypeInt && d->values[0] == 0 &&
-        ScriptSite(vm, kFinishPanelPc, -10, kFinishPanelCode, sizeof(kFinishPanelCode))) {
+        ScriptSite(vm, kFinishPanel)) {
         d->values[0] = (uint32_t)g.local;  // value only; type kept
         static int logged = 0;
         if (logged++ < 2) Log(false, L"race: the finish panel shows this game's car (racer %d)", g.local);
@@ -2019,14 +2171,16 @@ void __cdecl Hook090a(void* vm, NativeCall* d) {
 // game type (0916): an online race (5) has RETURN TO LOBBY and no PLAY AGAIN / RESTART, which would
 // restart this game alone. Our races are Single Races (1), so those two calls see 5. Every other
 // 0916 call (finish display, autosave) sees the real type.
-const uint32_t kResultsMenuPc = 0x22fd + 8;  // results GetRetryExitMenu
 const uint8_t kResultsMenuCode[] = {0x32, 0x00, 0x16, 0x09, 0x00, 0x00, 0x2a, 0x04, 0x32, 0x00, 0x38, 0x09, 0x00, 0x00, 0x2b, 0x04};
-const uint32_t kPauseMenuPc = 0x0cdd + 8;    // pause_menu item list
+const ScriptSiteDef kResultsMenu = {"results retry/quit menu (0916)", kScriptResults, -8, kResultsMenuCode, sizeof(kResultsMenuCode),
+                                    {0x22fd + 8}};  // results GetRetryExitMenu (before the profile cursor's insertion: the same in ours)
 const uint8_t kPauseMenuCode[] = {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0x2f, 0x02, 0x51, 0x00, 0x02, 0x3b, 0x66, 0xef, 0x33};
+const ScriptSiteDef kPauseMenu = {"pause menu item list (0916)", kScriptPauseMenu, -8, kPauseMenuCode, sizeof(kPauseMenuCode), {0x0cdd + 8}};
 // The results list's time limit (our `results` module, re\m7-profile\FINDINGS.md: the stock's 0x25e9 moved 12 bytes down by the
 // profile cursor's frame call): with type 5 the list stays up to 60 s (g9 = 3000 ticks, the console's online limit) instead of 15.
-const uint32_t kResultsListPc = 0x25e9 + kResultsInsert + 8;
 const uint8_t kResultsListCode[] = {0x32, 0x00, 0x16, 0x09, 0x00, 0x00, 0x9d, 0x04, 0x51, 0x05, 0x4a, 0x14, 0x08, 0x00, 0x57, 0x09};
+const ScriptSiteDef kResultsList = {"results list limit (0916)", kScriptResults, -8, kResultsListCode, sizeof(kResultsListCode),
+                                    {0x25e9 + kResultsInsert + 8, 0x25e9 + 8}};
 const uint32_t kGameTypeOnline = 5;
 
 // Online pause (M6, re\m6-pause\FINDINGS.md): the PC pause menu still has the console's. With game type 5
@@ -2035,18 +2189,24 @@ const uint32_t kGameTypeOnline = 5;
 // of 0927 (the car back); the menu closes itself when the results start. So the menu sees 5 at its open
 // site, and then (while that pause is open) at its other type-5 sites: the race-end close, the HUD_UNPAUSE
 // skips and the unpause. The latch keeps the unpause the same kind as the pause.
-struct PauseSite {
-    uint32_t pc;
-    uint8_t code[16];  // from PC - 8
+const uint8_t kPauseOpenCode[16] = {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0xb8, 0x00, 0x51, 0x05, 0x4b, 0x14, 0x21, 0x00, 0x32, 0x00};  // from PC - 8
+const ScriptSiteDef kPauseOpen = {"pause open (0916)", kScriptPauseMenu, -8, kPauseOpenCode, 16, {0x04c4}};
+const uint8_t kPauseCodes[6][16] = {
+    {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0xf4, 0x00, 0x51, 0x05, 0x4a, 0x02, 0x0e, 0x42, 0xd2, 0x86},  // race end: close
+    {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0x61, 0x01, 0x51, 0x05, 0x4b, 0x14, 0x15, 0x00, 0x02, 0x81},  // HUD_UNPAUSE skips
+    {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0x6e, 0x01, 0x51, 0x05, 0x4b, 0x14, 0x15, 0x00, 0x02, 0x81},
+    {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0x7d, 0x01, 0x51, 0x05, 0x4b, 0x14, 0x15, 0x00, 0x02, 0x81},
+    {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0x94, 0x01, 0x51, 0x05, 0x4b, 0x14, 0x0c, 0x00, 0x32, 0x00},  // unpause: 0929
+    {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0xcb, 0x01, 0x51, 0x05, 0x4a, 0x02, 0x0e, 0x42, 0xd2, 0x86},  // controls page: race end
 };
-const PauseSite kPauseOpen = {0x04c4, {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0xb8, 0x00, 0x51, 0x05, 0x4b, 0x14, 0x21, 0x00, 0x32, 0x00}};
-const PauseSite kPauseSites[] = {
-    {0x067e, {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0xf4, 0x00, 0x51, 0x05, 0x4a, 0x02, 0x0e, 0x42, 0xd2, 0x86}},  // race end: close
-    {0x0842, {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0x61, 0x01, 0x51, 0x05, 0x4b, 0x14, 0x15, 0x00, 0x02, 0x81}},  // HUD_UNPAUSE skips
-    {0x089a, {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0x6e, 0x01, 0x51, 0x05, 0x4b, 0x14, 0x15, 0x00, 0x02, 0x81}},
-    {0x08f6, {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0x7d, 0x01, 0x51, 0x05, 0x4b, 0x14, 0x15, 0x00, 0x02, 0x81}},
-    {0x098d, {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0x94, 0x01, 0x51, 0x05, 0x4b, 0x14, 0x0c, 0x00, 0x32, 0x00}},  // unpause: 0929
-    {0x0aa1, {0x32, 0x00, 0x16, 0x09, 0x01, 0x00, 0xcb, 0x01, 0x51, 0x05, 0x4a, 0x02, 0x0e, 0x42, 0xd2, 0x86}},  // controls page: race end
+enum { kPauseRaceEndClose, kPauseHudSkipA, kPauseHudSkipB, kPauseHudSkipC, kPauseUnpause, kPauseControlsRaceEnd };
+const ScriptSiteDef kPauseSites[6] = {
+    {"pause race-end close (0916)", kScriptPauseMenu, -8, kPauseCodes[0], 16, {0x067e}},
+    {"pause HUD_UNPAUSE skip a (0916)", kScriptPauseMenu, -8, kPauseCodes[1], 16, {0x0842}},
+    {"pause HUD_UNPAUSE skip b (0916)", kScriptPauseMenu, -8, kPauseCodes[2], 16, {0x089a}},
+    {"pause HUD_UNPAUSE skip c (0916)", kScriptPauseMenu, -8, kPauseCodes[3], 16, {0x08f6}},
+    {"pause unpause (0916)", kScriptPauseMenu, -8, kPauseCodes[4], 16, {0x098d}},
+    {"pause controls page race-end close (0916)", kScriptPauseMenu, -8, kPauseCodes[5], 16, {0x0aa1}},
 };
 
 // The results set blackboard key 0x86d2420e ("the results started") and nothing on PC clears it, so after any
@@ -2056,11 +2216,16 @@ const PauseSite kPauseSites[] = {
 // over. Closed later, the pause menu destroyed the TOPBAR, BUTTONS and TXTBOX scenes it shares with the results,
 // which had just found them and made none: no RESULTS title or CONTINUE (re\m7-results-title\FINDINGS.md).
 const uint32_t kResultsStartedKey = 0x86d2420e;
-const uint32_t kResultsStartPc = 0x1ade + 15;  // results: HASH 86d2420e; INT8 1; NAT 1b03/2 (from PC - 15; both .sbn)
 const uint8_t kResultsStartCode[] = {0x02, 0x0e, 0x42, 0xd2, 0x86, 0x51, 0x01, 0x32, 0x02, 0x03, 0x1b, 0x00, 0x00, 0xc6, 0x02};
-const PauseSite kPauseEndReads[] = {
-    {0x068e, {0x02, 0x0e, 0x42, 0xd2, 0x86, 0x32, 0x01, 0x01, 0x1b, 0x01, 0x00, 0xf4, 0x00, 0x4f}},  // from PC - 13 (14 bytes)
-    {0x0ab1, {0x02, 0x0e, 0x42, 0xd2, 0x86, 0x32, 0x01, 0x01, 0x1b, 0x01, 0x00, 0xcb, 0x01, 0x4f}},
+const ScriptSiteDef kResultsStart = {"RESULTS_START (1b03)", kScriptResults, -15, kResultsStartCode, sizeof(kResultsStartCode),
+                                     {0x1ade + 15}};  // results: HASH 86d2420e; INT8 1; NAT 1b03/2 (from PC - 15; both .sbn)
+const uint8_t kPauseEndReadCodes[2][14] = {
+    {0x02, 0x0e, 0x42, 0xd2, 0x86, 0x32, 0x01, 0x01, 0x1b, 0x01, 0x00, 0xf4, 0x00, 0x4f},  // from PC - 13
+    {0x02, 0x0e, 0x42, 0xd2, 0x86, 0x32, 0x01, 0x01, 0x1b, 0x01, 0x00, 0xcb, 0x01, 0x4f},
+};
+const ScriptSiteDef kPauseEndReads[2] = {
+    {"pause race-end key read (1b01)", kScriptPauseMenu, -13, kPauseEndReadCodes[0], 14, {0x068e}},
+    {"pause controls page key read (1b01)", kScriptPauseMenu, -13, kPauseEndReadCodes[1], 14, {0x0ab1}},
 };
 
 void __cdecl Hook0916(void* vm, NativeCall* d) {
@@ -2068,7 +2233,7 @@ void __cdecl Hook0916(void* vm, NativeCall* d) {
     // The stock 0916 returns the type through 0x48c640, which always stores type 3 (hash); the script
     // compares it with an int (`INT8 5; EQ`). Only the value changes.
     if (!vm || (d->retType != kTypeHash && d->retType != kTypeInt)) return;
-    if (ScriptSite(vm, kPauseOpen.pc, -8, kPauseOpen.code, sizeof(kPauseOpen.code))) {
+    if (ScriptSite(vm, kPauseOpen)) {
         g_netPause = g_returnToLobby && g.phase == kRunning && !RaceOver();
         g_pauseOpen = g_netPause;
         if (!g_netPause) return;
@@ -2076,23 +2241,24 @@ void __cdecl Hook0916(void* vm, NativeCall* d) {
         Log(false, L"race: online pause: the race keeps running; the AI drives this car until CONTINUE");
         return;
     }
-    for (const PauseSite& s : kPauseSites)
-        if (g_netPause && ScriptSite(vm, s.pc, -8, s.code, sizeof(s.code))) {
+    for (int i = 0; i < 6; ++i)
+        if (g_netPause && ScriptSite(vm, kPauseSites[i])) {
             // CONTINUE (0x098d, right before the unpause), or the race end's close: the race-end polls (0x067e, 0x0aa1) run
             // every frame while the menu is up and close it only once the race is over.
-            if (s.pc == 0x098d || ((s.pc == 0x067e || s.pc == 0x0aa1) && (RaceOver() || g.resultsStarted || LocalFinished()))) g_pauseOpen = false;
+            bool endPoll = i == kPauseRaceEndClose || i == kPauseControlsRaceEnd;
+            if (i == kPauseUnpause || (endPoll && (RaceOver() || g.resultsStarted || LocalFinished()))) g_pauseOpen = false;
             d->retValue = kGameTypeOnline;
             return;
         }
     if (!g_returnToLobby) return;
-    if (ScriptSite(vm, kResultsListPc, -8, kResultsListCode, sizeof(kResultsListCode))) {
+    if (ScriptSite(vm, kResultsList)) {
         d->retValue = kGameTypeOnline;
         static int listLogged = 0;
         if (listLogged++ < 2) Log(false, L"race: results: the list stays up to 60 s (the console's online limit) for the profile cursor");
         return;
     }
-    bool results = ScriptSite(vm, kResultsMenuPc, -8, kResultsMenuCode, sizeof(kResultsMenuCode));
-    if (!results && !ScriptSite(vm, kPauseMenuPc, -8, kPauseMenuCode, sizeof(kPauseMenuCode))) return;
+    bool results = ScriptSite(vm, kResultsMenu);
+    if (!results && !ScriptSite(vm, kPauseMenu)) return;
     d->retValue = kGameTypeOnline;
     static int logged = 0;
     if (logged++ < 4) Log(false, L"race: the %s menu offers RETURN TO LOBBY", results ? L"results" : L"pause");
@@ -2104,14 +2270,15 @@ void __cdecl Hook0916(void* vm, NativeCall* d) {
 // network menu's Search) when this player is no longer in the Steam lobby. Only at front_main's one
 // read of that key (+0x438), once per race.
 const uint32_t kReturnKey = 0x72d1c72b, kReturnLobby = 0xb0a0d459, kReturnSearch = 0x7ab1c9a7;
-const uint32_t kFrontMainReadPc = 0x438 + 8;
 const uint8_t kFrontMainReadCode[] = {0x02, 0x2b, 0xc7, 0xd1, 0x72, 0x32, 0x01, 0x01, 0x1b, 0x01, 0x00, 0x92, 0x00};
+const ScriptSiteDef kFrontMainRead = {"front_main return key read (1b01)", kScriptFrontMain, -13, kFrontMainReadCode,
+                                      sizeof(kFrontMainReadCode), {0x438 + 8}};
 
 void __cdecl Hook1b01(void* vm, NativeCall* d) {
     Original<NativeFn>(kH1b01)(vm, d);
     if (g_netPause && vm && d->argc >= 1 && d->types[0] == kTypeHash && d->values[0] == kResultsStartedKey) {
-        for (const PauseSite& s : kPauseEndReads)
-            if (ScriptSite(vm, s.pc, -13, s.code, 14) && !RaceOver()) {
+        for (const ScriptSiteDef& s : kPauseEndReads)
+            if (ScriptSite(vm, s) && !RaceOver()) {
                 if (LocalFinished()) {  // at this game's own finish (before its results make their scenes; a first race's key is 0 yet)
                     d->retValue = 1;
                     if (d->retType == kTypeNone) d->retType = kTypeInt;
@@ -2122,7 +2289,7 @@ void __cdecl Hook1b01(void* vm, NativeCall* d) {
         return;
     }
     if (!vm || d->argc < 1 || d->types[0] != kTypeHash || d->values[0] != kReturnKey) return;
-    if (!ScriptSite(vm, kFrontMainReadPc, -13, kFrontMainReadCode, sizeof(kFrontMainReadCode))) return;
+    if (!ScriptSite(vm, kFrontMainRead)) return;
     LobbySnapshot js;
     LobbyRead(js);
     if (js.pendingJoin && js.state != kLobbyOff && g_licensePicked) {  // a Steam join waits: the online search takes it
@@ -2151,12 +2318,14 @@ void __cdecl Hook1b01(void* vm, NativeCall* d) {
 // Pack 0x2122, the standalone Metal Sonic 1.1.2 0x20a7: re\m9-metal112\FINDINGS.md) and writes it to blackboard GameSetup.Difficulty (0 Easy, 1 Medium, 2 Hard; SetupRace
 // copies it to the AI). For our race it reads the host's: lobby AI 1..3 = difficulty 0..2. The profile
 // isn't touched. Lobby AI 0 ("off"): no AI racers (Easy here; nothing uses it).
-const uint32_t kBridgeDifficultyPcRoster = 0x2122 + 8, kBridgeDifficultyPcStock = 0x2080 + 8, kBridgeDifficultyPcMetal = 0x20a7 + 8;
 const uint8_t kBridgeDifficultyCode[] = {0x51, 0x03, 0x32, 0x01, 0x03, 0x20, 0x01, 0x00, 0xbe, 0x03};
+const ScriptSiteDef kBridgeDifficulty = {"bridge difficulty (2003)", kScriptBridge, -10, kBridgeDifficultyCode, sizeof(kBridgeDifficultyCode),
+                                         {0x2080 + 8, 0x2122 + 8, 0x20a7 + 8}};  // stock, Roster Pack, Metal 1.1.2
 // Right after, 2003(1) reads the racer count (stock 0x20f9, Roster Pack 0x219b, Metal 1.1.2 0x2120): the bridge makes that many
 // cars, its own player and then AI while any are left (re\m6-rules\FINDINGS.md A1). Our race: Cars().
-const uint32_t kBridgeRacersPcRoster = 0x219b + 8, kBridgeRacersPcStock = 0x20f9 + 8, kBridgeRacersPcMetal = 0x2120 + 8;
 const uint8_t kBridgeRacersCode[] = {0x51, 0x01, 0x32, 0x01, 0x03, 0x20, 0x01, 0x00, 0xcb, 0x03};
+const ScriptSiteDef kBridgeRacers = {"bridge racer count (2003)", kScriptBridge, -10, kBridgeRacersCode, sizeof(kBridgeRacersCode),
+                                     {0x20f9 + 8, 0x219b + 8, 0x2120 + 8}};
 
 // The course availability query 2003(73, course hash) (our lobby's refresh_courses, tools/netmenu/settings.py; also the stock
 // course select and leaderboards) for Egg Hangar's course: the stock answer (0x547aa0: the profile's unlocks, which the Egg Hangar
@@ -2173,19 +2342,14 @@ void __cdecl Hook2003(void* vm, NativeCall* d) {
     }
     if (!(g.phase == kArmed && g.launched) && g.phase != kCreating) return;
     if (!vm || d->argc != 1 || d->retType != kTypeInt) return;
-    if (ScriptSite(vm, kBridgeRacersPcRoster, -10, kBridgeRacersCode, sizeof(kBridgeRacersCode)) ||
-        ScriptSite(vm, kBridgeRacersPcStock, -10, kBridgeRacersCode, sizeof(kBridgeRacersCode)) ||
-        ScriptSite(vm, kBridgeRacersPcMetal, -10, kBridgeRacersCode, sizeof(kBridgeRacersCode))) {
+    if (ScriptSite(vm, kBridgeRacers)) {
         int32_t own = (int32_t)d->retValue;
         d->retValue = (uint32_t)Cars();  // (also a profile whose racer count isn't 8)
         g.racersSet = true;
         if (own != Cars()) Log(false, L"race: %d racers from the host's rules (this profile's: %d)", Cars(), own);
         return;
     }
-    if (!ScriptSite(vm, kBridgeDifficultyPcRoster, -10, kBridgeDifficultyCode, sizeof(kBridgeDifficultyCode)) &&
-        !ScriptSite(vm, kBridgeDifficultyPcStock, -10, kBridgeDifficultyCode, sizeof(kBridgeDifficultyCode)) &&
-        !ScriptSite(vm, kBridgeDifficultyPcMetal, -10, kBridgeDifficultyCode, sizeof(kBridgeDifficultyCode)))
-        return;
+    if (!ScriptSite(vm, kBridgeDifficulty)) return;
     int32_t own = (int32_t)d->retValue, host = g.c.ai >= 1 ? g.c.ai - 1 : 0;
     d->retValue = (uint32_t)host;
     g.difficultySet = true;
@@ -2330,6 +2494,81 @@ void IntroUpdate(void* self, int which);  // the intros: each screen's own skip,
 void __fastcall HookTrackIntro(void* self, void*) { IntroUpdate(self, kHTrackIntro); }
 void __fastcall HookCharacterIntro(void* self, void*) { IntroUpdate(self, kHCharIntro); }
 
+// ---------------------------------------------------------------- the race clock on real time
+// The game steps its simulation 50 times a second, at most 4 steps a frame (0x4a05f0): a frame longer than about 80 ms
+// drops the rest, and the race clock [kRaceClock] (one tick per step) falls behind real time. A PC with long frames then
+// reports a better time than the race really took (player logs: 0-2.7 s a race, up to 8 s; re\race-clock\FINDINGS.md).
+// D = T - acc - step ms * (steps + n), taken at a frame's first step, stays the same while the simulation keeps up and
+// grows by exactly the time dropped. From the countdown's release, each Racing / WaitingForFinishers tick adds the whole
+// ticks dropped since to the race clock, so the HUD time, the lap and finish times and the race end's estimates (scaled
+// from a finisher's time, 0x4cd290) are real time on every PC. Nothing in a Single Race tests the clock for one value.
+double StepMs() {
+    uint32_t rate = *(volatile uint32_t*)(uintptr_t)kTickRate;
+    return 1000.0 / (rate ? rate : 50);
+}
+
+// Every step from the intros to the race end (the intro, countdown, Racing and WaitingForFinishers hooks), before the stock
+// update. D at a frame's first step already holds that frame's own dropped steps ([kFrameSteps] is the capped count).
+void ClockObserve() {
+    uint8_t* app = *(uint8_t**)(uintptr_t)kAppPtr;
+    if (!app) return;
+    uint32_t t = *(volatile uint32_t*)(app + kAppFrameTime);
+    uint32_t step = *(volatile uint32_t*)(uintptr_t)kStepCount;
+    if (!g.clockSeen) {
+        g.clockSeen = true;
+        g.clockT0 = t;
+        g.clockStep0 = step;
+    } else if (t != g.clockT && step == g.clockStep + 1) {  // a new frame, and no step missed since: its first step
+        float acc = *(volatile float*)(uintptr_t)kStepAcc;
+        int32_t n = *(volatile int32_t*)(uintptr_t)kFrameSteps;
+        g.clockD = (double)(uint32_t)(t - g.clockT0) - acc - StepMs() * ((double)(uint32_t)(step - g.clockStep0) + n);
+        g.clockValid = true;
+        if (g.phase == kRunning && !g.clockBase) {  // released before a frame start was seen: from here
+            g.clockBase = true;
+            g.clockD0 = g.clockD;
+        }
+    }
+    g.clockT = t;
+    g.clockStep = step;
+}
+
+// At the countdown's release (every screen lined up): the dropped time from here on counts.
+void ClockStart() {
+    if (!g.clockValid) return;  // (ClockObserve takes the next frame start)
+    g.clockBase = true;
+    g.clockD0 = g.clockD;
+}
+
+// A Racing / WaitingForFinishers tick, before the stock update: the race clock catches up the whole ticks dropped.
+void ClockCatchUp() {
+    if (!g.clockBase || g.clockBroken || RaceOver()) return;
+    double lost = g.clockD - g.clockD0;
+    if (lost < 0) return;
+    if (lost > 3600000.0) {  // over an hour: not a long frame
+        g.clockBroken = true;
+        Log(true, L"race: clock: the frame timer read %.0f ms dropped; the race clock is left as it is", lost);
+        return;
+    }
+    uint32_t due = (uint32_t)(lost / StepMs());
+    if (due <= g.clockAdded) return;
+    uint32_t add = due - g.clockAdded;
+    *(volatile uint32_t*)(uintptr_t)kRaceClock += add;
+    g.clockAdded = due;
+    ++g.clockFixes;
+    if (add > g.clockBiggest) g.clockBiggest = add;
+    if (add >= 5 && g.clockLogged < 20) {  // 100 ms or more at once
+        ++g.clockLogged;
+        Log(false, L"race: clock: a long frame here dropped %.0f ms; the race clock caught up (%.0f ms in all)", add * StepMs(),
+            g.clockAdded * StepMs());
+    }
+}
+
+void ClockSummary() {
+    if (g.clockBase) Log(false, L"race: clock: this game's race clock caught up %.0f ms dropped by long frames (%d catch-ups, the largest %.0f ms)",
+                         g.clockAdded * StepMs(), g.clockFixes, g.clockBiggest * StepMs());
+    else Log(true, L"race: clock: the frame timer was never read; this game's times are its simulation's");
+}
+
 // Hold B: before the first countdown step, until everyone has reached it.
 const uint32_t kCountdownSalt = 0x474f474f;  // "GOGO": not the grid's or the tips' seed
 void __fastcall HookCountdown(void* self, void*) {
@@ -2345,6 +2584,7 @@ void __fastcall HookCountdown(void* self, void*) {
             SendToAll(b, EncodeLoaded(g.c.race, kStageCountdown, (uint8_t)g.local, b, sizeof(b)), true);
             HostReleases();
         }
+        ClockObserve();
         if (g.phase == kHoldB) {
             ResendLoaded(kStageCountdown);
             // (a player who skipped the intros at once waits here for the others' whole intros: up to kIntroCap + the racer intro's 5 s)
@@ -2352,6 +2592,7 @@ void __fastcall HookCountdown(void* self, void*) {
             if (g.released < kStageCountdown) Log(true, L"online race %08x: the others did not reach the countdown within %lu s; starting", g.c.race, kHoldBMs / 1000);
             else Log(false, L"race: countdown released after %lu ms", GetTickCount() - g.holdSince);
             g.phase = kRunning;
+            ClockStart();
             // The shared RNG again from the race's seed, here where every screen is lined up: the intros may have
             // drawn a different number of times per PC (the course-music picker draws once only on a PC that owns 2+
             // of the zone's tracks; re\m7-music\FINDINGS.md 4).
@@ -2375,6 +2616,13 @@ void RaceUpdate(void* self, int which, bool wff) {
     Tick();
     bool wait = false;
     if (g.phase == kRunning) {
+        ClockObserve();
+        ClockCatchUp();  // (before the stock update: this tick's lap and finish stamps include it)
+        if (g_debugStallMs && !g.clockStalled && *(volatile uint32_t*)(uintptr_t)kRaceClock >= 500 && !RaceOver()) {
+            g.clockStalled = true;  // (10 s in: a stutter of [Debug] StallMs, to test ClockCatchUp in game)
+            Log(false, L"race: debugging: this game freezes for %u ms now (config.ini [Debug] StallMs)", g_debugStallMs);
+            Sleep(g_debugStallMs);
+        }
         DropNetworkCarItems();
         ApplyFinishes();
         NoteTestFinishes();
@@ -2450,6 +2698,7 @@ void RaceUpdate(void* self, int which, bool wff) {
     if (RaceOver() && !g.overLogged) {
         g.overLogged = true;
         Log(false, L"race: this game's race is over");
+        ClockSummary();
     }
     if (wff && RaceOver()) LogResults(L"as sorted by the game");  // the update sorts in the tick it ends
 }
@@ -4031,6 +4280,9 @@ void RaceTestSetLapAddresses(uintptr_t applyNav, uintptr_t records, uintptr_t fi
     kApplyNavLine = applyNav; kRecords = records; kFinishCount = finishCount; kFinishList = finishList; kRaceOver = raceOver;
     kAddFinish = addFinish; kStartEndTimer = startEndTimer; kEndTimerElapsed = timerElapsed; kEndTimerLimit = timerLimit; kTickRate = tickRate;
 }
+void RaceTestSetClockAddresses(uintptr_t app, uintptr_t stepAcc, uintptr_t stepCount, uintptr_t frameSteps, uintptr_t raceClock) {
+    kAppPtr = app; kStepAcc = stepAcc; kStepCount = stepCount; kFrameSteps = frameSteps; kRaceClock = raceClock;
+}
 int RaceTestPhase() { return g.phase; }
 void* RaceTestRacer(int k) { return g.racers[k]; }
 bool RaceTestReturnFlag() { return g_returnToLobby; }
@@ -4240,6 +4492,9 @@ void RaceConfigure(const wchar_t* configIni) {
     if (g_hostAiConfig && !g_itemsConfig) Log(false, L"online races: as host, each game shows only its own player's items (config.ini [Race] ItemSync=0)");
     g_forceDriftPlusOff = GetPrivateProfileIntW(L"Debug", L"ForceDriftPlusOff", 0, configIni) != 0;
     if (g_forceDriftPlusOff) Log(false, L"online races: as host, Drift+ is off in every race (config.ini [Debug] ForceDriftPlusOff=1)");
+    g_debugStallMs = GetPrivateProfileIntW(L"Debug", L"StallMs", 0, configIni);
+    if (g_debugStallMs > 30000) g_debugStallMs = 30000;
+    if (g_debugStallMs) Log(true, L"debugging: this game freezes for %u ms 10 s into each online race (config.ini [Debug] StallMs)", g_debugStallMs);
 }
 
 void RaceUseEggHangar(bool installed) {
@@ -4272,23 +4527,27 @@ void RaceUseRacerList(RacerListKind kind) {
 // (0911's other callers and the race logic still see network cars).
 // Egg Hangar (1.2.0) substitutes its own `hud` for the stock one (the console's Death Egg music picker, ea4224a3...): the same
 // code, later (gate 0x36d4, human 0x5b7f, text 0x5cc4; each pattern found once there). Without these the tags and the race's
-// notice ticker were silently off on every PC with Egg Hangar (the user's 1.1.0 check B).
+// notice ticker were silently off on every PC with Egg Hangar (the user's 1.1.0 check B); since 1.1.1-dp13 the sites are found by
+// their bytes wherever they lie (the known offsets below are the stock hud's and Egg Hangar's).
 namespace {
-const uint32_t kHudTagGatePcEgg = 0x36d4 + 8, kHudTagHumanPcEgg = 0x5b7f + 8, kHudTagTextPcEgg = 0x5cc4 + 8;
-const uint32_t kHudTagGatePc = 0x36b6 + 8;
 const uint8_t kHudTagGateCode[] = {0x32, 0x00, 0x38, 0x09, 0x00, 0x00, 0x18, 0x04, 0x51, 0x01, 0x48, 0x14, 0x0c, 0x00};  // from PC - 8
-const uint32_t kHudTagHumanPc = 0x5b1d + 8;
+const ScriptSiteDef kHudTagGate = {"HUD tags gate (0938)", kScriptHud, -8, kHudTagGateCode, sizeof(kHudTagGateCode), {0x36b6 + 8, 0x36d4 + 8}};
 const uint8_t kHudTagHumanCode[] = {0x07, 0x01, 0x39, 0x32, 0x01, 0x11, 0x09, 0x00, 0x00, 0x8b, 0x09, 0x14, 0x17, 0x00};  // from PC - 11
+const ScriptSiteDef kHudTagHuman = {"HUD tags human (0911)", kScriptHud, -11, kHudTagHumanCode, sizeof(kHudTagHumanCode), {0x5b1d + 8, 0x5b7f + 8}};
 
 // The tags' gate (0938 at hud 0x36b6, or Egg Hangar's hud 0x36d4): also the race's notice ticker's frame.
-bool HudTagGate(void* vm) {
-    return ScriptSite(vm, kHudTagGatePc, -8, kHudTagGateCode, sizeof(kHudTagGateCode)) ||
-           ScriptSite(vm, kHudTagGatePcEgg, -8, kHudTagGateCode, sizeof(kHudTagGateCode));
-}
+bool HudTagGate(void* vm) { return ScriptSite(vm, kHudTagGate); }
 
 Peer* TaggedPeer(int k) {
     Peer* p = PeerByIndex(k);
     return p && !p->gone ? p : nullptr;
+}
+
+// 1.1.1 (the user's request; an addition: the consoles tagged only the players): a computer racer's car gets a tag with its
+// racer's name too: the grid's computer racers and a departed player's car once it drives as one. Never this screen's car.
+bool CpuTagged(int k) {
+    return k >= 0 && k < kGridSlots && k != g.local && g.racers[k] && (k >= g.c.humanCount || g.adopted[k]) && !TaggedPeer(k) &&
+           RacerDisplayName(k);
 }
 
 bool TagsOn() {
@@ -4306,8 +4565,8 @@ bool Number(const NativeCall* d) { return d->retType == kTypeInt || d->retType =
 // 0x485410 through the object's vtbl[0] = 0x485200, so a text-buffer object of our own is enough).
 GAME_ADDRESS kSetElementText = 0x47f3a0;
 const uint32_t kTextBufferVtable = 0x6a71f8;  // native 1610 objects: +8 capacity, +0xc char*
-const uint32_t kHudTagTextPc = 0x5c62 + 8;
 const uint8_t kHudTagTextCode[] = {0x07, 0x0c, 0x3c, 0x0b, 0x02, 0x3c, 0x32, 0x02, 0x1f, 0x02, 0x00, 0x00, 0xd3, 0x09, 0x18};  // from PC - 14
+const ScriptSiteDef kHudTagText = {"HUD tag text (021f)", kScriptHud, -14, kHudTagTextCode, sizeof(kHudTagTextCode), {0x5c62 + 8, 0x5cc4 + 8}};
 const uint32_t kTagLabels[kGridSlots] = {0x1c49c7c3, 0x8c88e2d8, 0xf4de4cbd, 0x68ec5037, 0x16695b6b, 0x8b2f5c98, 0xd4db35e5, 0x3a3c603e};  // "1P".."8P"
 typedef bool(__stdcall* SetElementTextFn)(uint32_t element, void* text);
 
@@ -4499,6 +4758,7 @@ int32_t FlowState() {
 void TestPlayerIntros();
 void IntroUpdate(void* self, int which) {
     if (Active()) Tick();
+    if (Active() && g.phase == kIntros) ClockObserve();  // (seen every step before hold B: a release at its first step has its base)
     if (g.phase != kIntros || !self) { Original<UpdateFn>(which)(self); return; }
     bool course = which == kHTrackIntro;
     int32_t state = course ? kStateTrackIntro : kStateCharIntro;
@@ -5595,12 +5855,13 @@ void LogVoices() {
 // 0x425b prints the row's character name into its text buffer (1612(g1f[k], row[1]): 0x5fd200, sprintf "%s"
 // into the buffer's +0xc, no bound). A human's row gets their Steam name instead, as on the console; AI rows
 // and every other 1612 keep the game's text.
-const uint32_t kResultsNamePc = 0x425b + kResultsInsert + 8;
 const uint8_t kResultsNameCode[] = {0x07, 0x06, 0x51, 0x01, 0x23, 0x3b, 0x32, 0x02, 0x12, 0x16, 0x00, 0x00, 0x9f, 0x09, 0x18};  // from PC - 14
+const ScriptSiteDef kResultsName = {"results row name (1612)", kScriptResults, -14, kResultsNameCode, sizeof(kResultsNameCode),
+                                    {0x425b + kResultsInsert + 8, 0x425b + 8}};
 
 static bool ResultsRowName(void* vm, NativeCall* d) {
     if (g.phase != kRunning || !RaceOver() || g.rowHuman < 0 || g.rowHuman >= g.c.humanCount || !g.names[g.rowHuman][0]) return false;
-    if (d->argc != 2 || d->types[0] != kTypeObject || !ScriptSite(vm, kResultsNamePc, -14, kResultsNameCode, sizeof(kResultsNameCode))) return false;
+    if (d->argc != 2 || d->types[0] != kTypeObject || !ScriptSite(vm, kResultsName)) return false;
     TextBuffer* out = (TextBuffer*)(uintptr_t)d->values[0];
     if (!out || out->vtable != kTextBufferVtable || out->capacity < 2 || !out->text) {
         if (!g.rowNameLogged) Log(true, L"race: a results row's name box was not recognised; the rows show the racers' names");
@@ -5616,14 +5877,14 @@ static bool ResultsRowName(void* vm, NativeCall* d) {
 // The pause menu's title "PAUSED nP" (`pause_menu` 0x0bec: 0f0f(car) = that car's human number +0x9dc,
 // 0x58fb17). Each game numbers only its own player (0), so a guest read "PAUSED 1P"; for that one call the
 // car carries its lobby slot (host 1P, guest 2P), as on the console. Put back in RaceNativeAfter.
-const uint32_t kPauseTitlePc = 0x0bec + 8;
 const uint8_t kPauseTitleCode[] = {0x0b, 0x01, 0x3a, 0x32, 0x01, 0x0f, 0x0f, 0x01, 0x00, 0x0b, 0x02, 0x51, 0x00, 0x27};  // from PC - 11
+const ScriptSiteDef kPauseTitle = {"pause title (0f0f)", kScriptPauseMenu, -11, kPauseTitleCode, sizeof(kPauseTitleCode), {0x0bec + 8}};
 
 static void PauseTitleBefore(void* vm, NativeCall* d) {
     g.titleRacer = -1;
     if (g.phase != kRunning || d->argc != 1 || !IntOrHash(d, 0) || d->values[0] >= (uint32_t)g.c.humanCount || d->values[0] >= kMaxHumans) return;
     int k = (int)d->values[0];
-    if (!g.racers[k] || !ScriptSite(vm, kPauseTitlePc, -11, kPauseTitleCode, sizeof(kPauseTitleCode))) return;
+    if (!g.racers[k] || !ScriptSite(vm, kPauseTitle)) return;
     int32_t* number = (int32_t*)((uint8_t*)g.racers[k] + kRacerHumanNumber);
     g.titleSaved = *number;
     g.titleRacer = k;
@@ -5637,9 +5898,10 @@ static void PauseTitleBefore(void* vm, NativeCall* d) {
 // D5E3E174 ("...END THE CURRENT RACE") or 21C7CA32, though the box and its texts (every language) are in the PC data. The box
 // function (pause_menu 0x1676) writes its body key into two text layers (0x16d5, 0x16e6): for the host with other players still
 // in the race, those two calls get the console's key. The buttons are the same (EXIT / BACK).
-const uint32_t kQuitBoxTextPc[2] = {0x16d5 + 8, 0x16e6 + 8};
 const uint8_t kQuitBoxTextCode[2][16] = {{0x02, 0x77, 0xa4, 0xc1, 0xf1, 0x0b, 0x01, 0x3c, 0x32, 0x02, 0x1f, 0x02, 0x01, 0x00, 0xc4, 0x03},
                                          {0x02, 0xe2, 0x82, 0x75, 0x37, 0x0b, 0x01, 0x3c, 0x32, 0x02, 0x1f, 0x02, 0x01, 0x00, 0xc5, 0x03}};  // from PC - 16
+const ScriptSiteDef kQuitBoxText[2] = {{"pause quit box text a (021f)", kScriptPauseMenu, -16, kQuitBoxTextCode[0], 16, {0x16d5 + 8}},
+                                       {"pause quit box text b (021f)", kScriptPauseMenu, -16, kQuitBoxTextCode[1], 16, {0x16e6 + 8}}};
 const uint32_t kQuitRaceKey = 0xd5e3e174, kQuitProgressKey = 0x21c7ca32, kQuitSessionKey = 0xaac0cd27;
 
 static void QuitBoxTextBefore(void* vm, NativeCall* d) {
@@ -5648,7 +5910,7 @@ static void QuitBoxTextBefore(void* vm, NativeCall* d) {
     bool others = false;
     for (int i = 0; i < g.peerCount; ++i) others |= !g.peers[i].gone && !g.peers[i].test;
     if (!others) return;
-    if (!ScriptSite(vm, kQuitBoxTextPc[0], -16, kQuitBoxTextCode[0], 16) && !ScriptSite(vm, kQuitBoxTextPc[1], -16, kQuitBoxTextCode[1], 16)) return;
+    if (!ScriptSite(vm, kQuitBoxText[0]) && !ScriptSite(vm, kQuitBoxText[1])) return;
     d->values[1] = kQuitSessionKey;
     if (!g.quitBoxLogged) Log(false, L"race: the pause menu's quit question says it ends the session for the other players (the host's, as on the console)");
     g.quitBoxLogged = true;
@@ -5663,15 +5925,13 @@ static void PauseTitleAfter() {
 // The loading screen's tips (re\m6-loading\FINDINGS.md 1): fe_game_bridge 0x09ce picks the first of its 4 tips
 // with 1d02 (the shared MT19937) before SetupRace reseeds it, so each PC showed its own. For our race that one
 // draw starts from the contract's seed: the same tips on every screen. Stock 0x09de, Roster Pack 0x0a80, Metal 1.1.2 0x0a05.
-const uint32_t kTipsPcStock = 0x09de + 8, kTipsPcRoster = 0x0a80 + 8, kTipsPcMetal = 0x0a05 + 8;
 const uint8_t kTipsCode[] = {0x55, 0x00, 0x07, 0x03, 0x3a, 0x32, 0x02, 0x02, 0x1d, 0x01, 0x00, 0xc4, 0x00, 0x57, 0x16, 0x07, 0x02, 0x23};  // from PC - 13
+const ScriptSiteDef kTips = {"loading tips draw (1d02)", kScriptBridge, -13, kTipsCode, sizeof(kTipsCode), {0x09de + 8, 0x0a80 + 8, 0x0a05 + 8}};
 const uint32_t kTipsSalt = 0x54495053;  // "TIPS": not the grid's own seed
 
 static void LoadingTipsBefore(void* vm) {
     if (!g.launched || g.phase < kArmed || g.phase >= kSetUp) return;
-    if (!ScriptSite(vm, kTipsPcStock, -13, kTipsCode, sizeof(kTipsCode)) && !ScriptSite(vm, kTipsPcRoster, -13, kTipsCode, sizeof(kTipsCode)) &&
-        !ScriptSite(vm, kTipsPcMetal, -13, kTipsCode, sizeof(kTipsCode)))
-        return;
+    if (!ScriptSite(vm, kTips)) return;
     ((SeedFn)(uintptr_t)kSeedRng)(g.c.seed ^ kTipsSalt);
     if (!g.tipsLogged) Log(false, L"race: the loading screen's tips come from the race's seed (the same on every screen)");
     g.tipsLogged = true;
@@ -5689,8 +5949,8 @@ GAME_ADDRESS kWorldPaused = 0xc2a015;  // byte
 GAME_ADDRESS kProfiles = 0xc2a520;     // 0x3af0 per license; +0x14 "empty slot" byte (2003(21), 0x545ec0)
 const uint32_t kActiveScreenKey = 0xb0567d36, kScreenGame = 0xbed107e7, kScreenRetryQuit = 0x603658c4;
 const uint32_t kGameModule = 0xbed107e7, kQuitGame = 0x682e3dfe;
-const uint32_t kGameInboxPc = 0x048e + 8;
 const uint8_t kGameInboxCode[] = {0x51, 0x01, 0x32, 0x01, 0x0e, 0x16, 0x02, 0x00, 0x2f, 0x00};  // from PC - 10
+const ScriptSiteDef kGameInbox = {"game inbox read (160e)", kScriptGame, -10, kGameInboxCode, sizeof(kGameInboxCode), {0x048e + 8}};
 struct ScriptValue { uint32_t value, type; };
 typedef const ScriptValue*(__thiscall* BlackboardGetFn)(uintptr_t board, uint32_t key);
 typedef bool(__cdecl* PostMessageFn)(uint32_t sender, uint32_t target, uint32_t msg, const ScriptValue* payload, uint32_t zero);
@@ -5726,7 +5986,7 @@ static bool QuitRace(uint32_t screen) {
 }
 
 static void LeaveRaceForJoin(void* vm) {
-    if (!g_licensePicked || !ScriptSite(vm, kGameInboxPc, -10, kGameInboxCode, sizeof(kGameInboxCode))) return;
+    if (!g_licensePicked || !ScriptSite(vm, kGameInbox)) return;
     LobbySnapshot s;
     LobbyRead(s);
     if (!s.pendingJoin || s.state == kLobbyOff || s.pendingJoin == g_joinQuitFor) return;
@@ -5759,8 +6019,9 @@ const uint32_t kDialogPlayersLeft = 0xcb5d217e;  // (edited by tools\build_menus
 const uint32_t kDialogHostLost = 0x8374a07b;     // (edited) the connection to the host lost, the session no longer available; OK
 const uint32_t kDialogHostEnded = 0x168056c7;    // the host has ended the match, returning to the lobby; OK
 // The dialogs module's OK path: HASH 424b961f; 0206/1 (the scene's hide). Our shipped module (Preview5) and the stock one.
-const uint32_t kDialogClosePc = 0x749 + 8, kDialogClosePcStock = 0x72d + 8;
 const uint8_t kDialogCloseCode[] = {0x02, 0x1f, 0x96, 0x4b, 0x42, 0x32, 0x01, 0x06, 0x02, 0x01, 0x00, 0x5e, 0x01};  // from PC - 13
+const ScriptSiteDef kDialogCloseSite = {"dialogs OK path (0206)", kScriptDialogs, -13, kDialogCloseCode, sizeof(kDialogCloseCode),
+                                        {0x749 + 8, 0x72d + 8}};  // ours, the stock's
 const DWORD kDialogMaxOpenMs = 300000;  // an answer not seen in 5 min (the dialog was replaced or closed another way): forgotten
 typedef bool(__fastcall* ArrayCreateFn)(uintptr_t helper, void*, ScriptValue* out, uint32_t count);
 typedef void(__fastcall* ArraySetFn)(uintptr_t helper, void*, ScriptValue* array, uint32_t index, const ScriptValue* element);
@@ -5860,12 +6121,23 @@ void RetryDialogClose() {
     if (g_dialog.closePending && PostDialogClose()) g_dialog.closePending = false;
 }
 
+// 1.1.1, the auto-update's notices (re\update-dialogs\FINDINGS.md): two definitions nothing else posts, their bodies rewritten
+// (tools\build_menus.py DIALOG_EDITS, tools\text_tables.py). Their own state (never g_dialog: its answer quits a race). Our
+// fe_mainmenu calls 7a1c only when the menu is idle, no dialog is up and a license is picked; the call site is checked (another
+// module's 7a1c, e.g. the game search, never posts one). A waiting Steam join goes first; one notice at a time, 1.5 s apart (a
+// post the dialogs module hasn't read yet would be replaced by the next one).
+const uint32_t kNoticeReadyDef = 0x9dc5ca23, kNoticeAppliedDef = 0x75cf8f27;
+const uint8_t kMainMenuJoinCode[] = {0x57, 0x16, 0x02, 0x85, 0x3a, 0xb8, 0x6c, 0x4b, 0x14, 0x3b,
+                                     0x00, 0x32, 0x00, 0x1c, 0x7a, 0x01, 0x00, 0xfe, 0x7f};  // from PC - 19
+const ScriptSiteDef kMainMenuJoin = {"main menu join check (7a1c)", kScriptMainMenu, -19, kMainMenuJoinCode, sizeof(kMainMenuJoinCode), {0x1c1a}};
+const DWORD kNoticeGapMs = 1500;
+DWORD g_noticePostedAt = 0;
+bool g_noticeSiteLogged = false;
+
 // 0206 at the dialogs module's OK path with our dialog up: the player answered.
 void NetDialogClosed(void* vm, const NativeCall* d) {
     if (!g_dialog.open || d->argc < 1 || d->types[0] != kTypeHash || d->values[0] != kDialogScene) return;
-    if (!ScriptSite(vm, kDialogClosePc, -13, kDialogCloseCode, sizeof(kDialogCloseCode)) &&
-        !ScriptSite(vm, kDialogClosePcStock, -13, kDialogCloseCode, sizeof(kDialogCloseCode)))
-        return;
+    if (!ScriptSite(vm, kDialogCloseSite)) return;
     g_dialog.open = false;
     g_dialog.answered = true;
     g_dialog.quitPending = true;
@@ -5883,6 +6155,23 @@ void CloseNetDialog() {
 }
 }  // namespace
 
+void RaceMainMenuJoinCheck(void* vm) {
+    int kind = AutoUpdateNoticePending();
+    if (!kind || !vm) return;
+    if (!ScriptSite(vm, kMainMenuJoin)) return;
+    if (!g_noticeSiteLogged) {
+        g_noticeSiteLogged = true;
+        Log(false, L"auto-update: the main menu can show the notice (our fe_mainmenu's join check)");
+    }
+    if (g_noticePostedAt && GetTickCount() - g_noticePostedAt < kNoticeGapMs) return;
+    LobbySnapshot s;
+    LobbyRead(s);
+    if (s.state != kLobbyOff && s.pendingJoin) return;  // a Steam join leaves the main menu first
+    if (!PostDialog(kind == kUpdateNoticeApplied ? kNoticeAppliedDef : kNoticeReadyDef)) return;  // the queue is full: next frame
+    g_noticePostedAt = GetTickCount();
+    AutoUpdateNoticeShown(kind);
+}
+
 // True: this call was handled here (the game's handler is not called).
 bool RaceNativeBefore(void* vm, NativeCall* d) {
     if (d && d->id == 0x2004) {
@@ -5891,7 +6180,7 @@ bool RaceNativeBefore(void* vm, NativeCall* d) {
     }
     if (vm && d && d->id == 0x160e) {
         LeaveRaceForJoin(vm);
-        if (ScriptSite(vm, kGameInboxPc, -10, kGameInboxCode, sizeof(kGameInboxCode))) NetDialogFrame();
+        if (ScriptSite(vm, kGameInbox)) NetDialogFrame();
         return false;
     }
     if (vm && d && d->id == 0x0206) {
@@ -5899,7 +6188,7 @@ bool RaceNativeBefore(void* vm, NativeCall* d) {
         return false;
     }
     if (vm && d && d->id == 0x1b03) {
-        if (g.phase == kRunning && !g.resultsStarted && ScriptSite(vm, kResultsStartPc, -15, kResultsStartCode, sizeof(kResultsStartCode))) {
+        if (g.phase == kRunning && !g.resultsStarted && ScriptSite(vm, kResultsStart)) {
             g.resultsStarted = true;
             if (g_pauseOpen) Log(false, L"race: this game's results started with the online pause open: it closes now, as on the console");
             // The lobby's race bar (a player waiting there): this player views the results now (the console's "VIEWING RESULTS"
@@ -5928,9 +6217,7 @@ bool RaceNativeBefore(void* vm, NativeCall* d) {
     if (vm && d && d->id == 0x1612) return ResultsRowName(vm, d);
     if (vm && d && d->id == 0x021f) QuitBoxTextBefore(vm, d);  // (then the HUD tags' check below: another site)
     if (!vm || !d || d->id != 0x021f || d->argc != 2 || d->types[0] != kTypeHash || d->types[1] != kTypeHash || !TagsOn()) return false;
-    if (!ScriptSite(vm, kHudTagTextPc, -14, kHudTagTextCode, sizeof(kHudTagTextCode)) &&
-        !ScriptSite(vm, kHudTagTextPcEgg, -14, kHudTagTextCode, sizeof(kHudTagTextCode)))
-        return false;
+    if (!ScriptSite(vm, kHudTagText)) return false;
     int k = -1;
     for (int i = 0; i < kGridSlots; ++i)
         if (d->values[1] == kTagLabels[i]) k = i;
@@ -5940,13 +6227,23 @@ bool RaceNativeBefore(void* vm, NativeCall* d) {
         unknownLogged = true;
         return false;
     }
-    if (k >= g.c.humanCount || !TaggedPeer(k) || !g.names[k][0]) return false;
+    static char cpuName[32];
+    char* text = nullptr;
+    bool cpu = CpuTagged(k);
+    if (cpu) {
+        strncpy_s(cpuName, RacerDisplayName(k), _TRUNCATE);
+        text = cpuName;
+    } else if (k < g.c.humanCount && TaggedPeer(k) && g.names[k][0]) {
+        text = g.names[k];
+    }
+    if (!text) return false;
     static TextBuffer buffer = {kTextBufferVtable, 0, 0, nullptr};
-    buffer.capacity = (int32_t)sizeof(g.names[k]);
-    buffer.text = g.names[k];
+    buffer.capacity = cpu ? (int32_t)sizeof(cpuName) : (int32_t)sizeof(g.names[k]);
+    buffer.text = text;
     bool ok = ((SetElementTextFn)(uintptr_t)kSetElementText)(d->values[0], &buffer);
-    bool& logged = g.tagLogged[2];
-    if (!logged) Log(false, L"race: the HUD tag over player %d's car shows their name%s", k, ok ? L"" : L" (the tag's text was not found)");
+    bool& logged = g.tagLogged[cpu ? 4 : 2];
+    if (!logged) Log(false, cpu ? L"race: the HUD tag over computer racer %d's car shows its racer's name%s" : L"race: the HUD tag over player %d's car shows their name%s",
+                     k, ok ? L"" : L" (the tag's text was not found)");
     logged = true;
     return ok;  // not found: the game's own label
 }
@@ -6029,10 +6326,8 @@ void RaceNativeAfter(void* vm, NativeCall* d) {
         if (!HudTagGate(vm) || (int32_t)d->retValue >= 2) return;
         d->retValue = 2;  // value only; type kept (none: int)
     } else {
-        if (d->argc != 1 || !IntOrHash(d, 0) || !TaggedPeer((int)d->values[0])) return;
-        if (!ScriptSite(vm, kHudTagHumanPc, -11, kHudTagHumanCode, sizeof(kHudTagHumanCode)) &&
-            !ScriptSite(vm, kHudTagHumanPcEgg, -11, kHudTagHumanCode, sizeof(kHudTagHumanCode)))
-            return;
+        if (d->argc != 1 || !IntOrHash(d, 0) || (!TaggedPeer((int)d->values[0]) && !CpuTagged((int)d->values[0]))) return;
+        if (!ScriptSite(vm, kHudTagHuman)) return;
         d->retValue = 1;
     }
     if (d->retType == kTypeNone) d->retType = kTypeInt;
@@ -6114,21 +6409,22 @@ int RaceTestPlayerRacer(int n, const int* taken, int takenCount) {
 uint32_t RaceLastId() { return g_lastRaceId; }
 
 #ifdef RACE_TEST
-// The `results` module's call sites this file checks (ScriptSite: the PC past the call, the bytes from PC + from), for
-// tests/test_race.cpp to verify against the built module (menus\out\results.smosbin): every site after 0x25e1 moved with the
-// profile cursor's insertion (kResultsInsert).
-int RaceTestResultsSites(RaceTestSite* out, int cap) {
-    const RaceTestSite sites[] = {
-        {kResultsRowPc, -8, kResultsRowCode, sizeof(kResultsRowCode), "results row (0912)"},
-        {kFinishPanelPc, -10, kFinishPanelCode, sizeof(kFinishPanelCode), "finish panel (0913)"},
-        {kResultsListPc, -8, kResultsListCode, sizeof(kResultsListCode), "list limit (0916)"},
-        {kResultsMenuPc, -8, kResultsMenuCode, sizeof(kResultsMenuCode), "retry/quit menu (0916)"},
-        {kResultsStartPc, -15, kResultsStartCode, sizeof(kResultsStartCode), "RESULTS_START (1b03)"},
-        {kResultsNamePc, -14, kResultsNameCode, sizeof(kResultsNameCode), "row name (1612)"},
+// Every script call site this file checks (ScriptSite), for tests/test_race.cpp to verify against the real modules: each site's
+// bytes once in its module (at a known offset) and in no other module of the package; the `results` sites against our built
+// module (menus\out\results.smosbin), where every site after 0x25e1 moved with the profile cursor's insertion (kResultsInsert).
+int RaceTestSites(const ScriptSiteDef** out, int cap) {
+    const ScriptSiteDef* sites[] = {
+        &kResultsRow, &kFinishPanel, &kResultsList, &kResultsMenu, &kResultsStart, &kResultsName,
+        &kPauseMenu, &kPauseOpen, &kPauseSites[0], &kPauseSites[1], &kPauseSites[2], &kPauseSites[3], &kPauseSites[4], &kPauseSites[5],
+        &kPauseEndReads[0], &kPauseEndReads[1], &kPauseTitle, &kQuitBoxText[0], &kQuitBoxText[1],
+        &kFrontMainRead, &kBridgeDifficulty, &kBridgeRacers, &kTips, &kHudTagGate, &kHudTagHuman, &kHudTagText,
+        &kGameInbox, &kDialogCloseSite, &kMainMenuJoin,
     };
     int n = 0;
-    for (const RaceTestSite& s : sites)
+    for (const ScriptSiteDef* s : sites)
         if (n < cap) out[n++] = s;
     return n;
 }
+
+uint32_t RaceTestSitePc(const uint8_t* module, const ScriptSiteDef& s) { return SitePc(module, s); }
 #endif

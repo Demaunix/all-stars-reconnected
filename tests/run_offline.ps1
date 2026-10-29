@@ -21,11 +21,21 @@ cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O2 /MT /EHsc /I`"$root\src`" /Fo`"$roo
 if ($LASTEXITCODE) { throw 'steer test build failed' }
 & (Join-Path $root 'build\test_steer.exe')
 $fail += $LASTEXITCODE
+# The auto-update (src/update.h). Not "test_update.exe": a 32-bit exe named *update* triggers Windows' installer detection (UAC).
+cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O2 /MT /EHsc /std:c++17 /DUNICODE /D_UNICODE /I`"$root\src`" /Fo`"$root\build\\`" /Fe`"$root\build\test_newversion.exe`" `"$root\tests\test_update.cpp`" bcrypt.lib"
+if ($LASTEXITCODE) { throw 'auto-update test build failed' }
+& (Join-Path $root 'build\test_newversion.exe') (Join-Path $root 'build\newversion-test') | Select-String -NotMatch '^PASS '
+$fail += $LASTEXITCODE
 cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O2 /MT /EHsc /DUNICODE /D_UNICODE /I`"$root\src`" /Fo`"$root\build\\`" /Fe`"$root\build\test_modset.exe`" `"$root\tests\test_modset.cpp`""
 if ($LASTEXITCODE) { throw 'modset test build failed' }
 $scratch = Join-Path $root 'build\modset-test'
 if (Test-Path $scratch) { Remove-Item $scratch -Recurse -Force }
 & (Join-Path $root 'build\test_modset.exe') $scratch 'A:\SteamLibrary\steamapps\common\Sonic and SEGA All Stars Racing\mods'
+$fail += $LASTEXITCODE
+# Friend figures (src/figure_presence.h): the encoding, the order, the config value, and the built DLL's AsrFigure* exports with Steam off.
+cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O2 /MT /EHsc /DUNICODE /D_UNICODE /I`"$root\src`" /Fo`"$root\build\\`" /Fe`"$root\build\test_figure.exe`" `"$root\tests\test_figure.cpp`""
+if ($LASTEXITCODE) { throw 'figure test build failed' }
+& (Join-Path $root 'build\test_figure.exe') (Join-Path $root 'build\figure-test') (Join-Path $root 'out\Steam Multiplayer\runtime\SteamMultiplayer.dll')
 $fail += $LASTEXITCODE
 cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O2 /MT /EHsc /DUNICODE /D_UNICODE /DSCRIPT_SUBST_TEST /I`"$root\src`" /I`"$root\build`" /Fo`"$root\build\\`" /Fe`"$root\build\test_script_subst.exe`" `"$root\tests\test_script_subst.cpp`" `"$root\src\script_subst.cpp`" bcrypt.lib"
 if ($LASTEXITCODE) { throw 'script substitution test build failed' }
@@ -63,7 +73,9 @@ if ($LASTEXITCODE) { throw 'voice test build failed' }
 $fail += $LASTEXITCODE
 cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O2 /MT /EHsc /std:c++17 /DUNICODE /D_UNICODE /DRACE_TEST /I`"$root\src`" /I`"$root\build`" /Fo`"$root\build\\`" /Fe`"$root\build\test_race.exe`" `"$root\tests\test_race.cpp`" `"$root\src\race.cpp`""
 if ($LASTEXITCODE) { throw 'race test build failed' }
-& (Join-Path $root 'build\test_race.exe') (Join-Path $root 'menus\out\results.smosbin') | Select-String -NotMatch '^    log:'
+# The script call sites (race.cpp ScriptSite, found by their bytes): our built modules, the three real packages, the rebuilt copies.
+& (Join-Path $root 'build\test_race.exe') (Join-Path $root 'menus\out\results.smosbin') "$game\Scripts\FrontEndScripts.sbn" $packSbn `
+    (Join-Path $root 'reference\metal-sonic-1.1.2\FrontEndScripts.sbn') (Join-Path $root 'reference\rebuilt-menus') | Select-String -NotMatch '^    log:'
 $fail += $LASTEXITCODE
 # The author's marks (src/fingerprint.h) are in the built DLL, and the finder sees none in a file without them.
 # (The finder is the author's own tool: not in the public source tree.)

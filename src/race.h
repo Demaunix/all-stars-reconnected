@@ -39,15 +39,31 @@ uint32_t RaceLastId();
 void RaceNativeAfter(void* vm, NativeCall* d);
 // And before it: true when the call was handled here instead (the game's handler is skipped).
 bool RaceNativeBefore(void* vm, NativeCall* d);
+// 1.1.1: our fe_mainmenu's Steam-join check (native 7a1c, before its handler): the auto-update's notices are posted here
+// (re\update-dialogs\FINDINGS.md C: the main menu is idle, no dialog is up, a license is picked).
+void RaceMainMenuJoinCheck(void* vm);
 // The results screen's profile cursor (native 7a20, natives.h kNatProfile; re\m7-profile\FINDINGS.md): field 0 steps it
 // (the keys pressed this frame) and returns its row, fields 1-3 what this frame changed (the row to un-highlight, the row
 // to highlight, the footer). Only during our online race's results; -1 / 0 otherwise.
 int32_t RaceProfileNative(int32_t field, int32_t up, int32_t down, int32_t f1);
 
+// A script call site race.cpp checks (ScriptSite): the `n` bytes (`code`) that identify it, starting at PC + `from` (the PC is just
+// past the 8-byte native call), found exactly once in the bound module's code. The site's identity is those bytes, not an offset:
+// another mod may rebuild a module in memory with a line inserted before the site (the bytes stay, the offset moves). `known` lists
+// the PC's module offsets in the modules this build was checked against (0: unused), so the log can say when a site has moved;
+// `module` is the module's name hash (documentation and the tests: the game gives a native hook no module name).
+struct ScriptSiteDef {
+    const char* name;
+    uint32_t module;
+    int from;
+    const uint8_t* code;
+    size_t n;
+    uint32_t known[3];
+};
+
 #ifdef RACE_TEST
-// A script call site race.cpp checks (ScriptSite): the module offset of the PC past the call, and `size` bytes at PC + from.
-struct RaceTestSite { uint32_t pc; int from; const uint8_t* code; size_t size; const char* name; };
-int RaceTestResultsSites(RaceTestSite* out, int cap);  // the `results` module's sites
+int RaceTestSites(const ScriptSiteDef** out, int cap);                   // every site race.cpp checks
+uint32_t RaceTestSitePc(const uint8_t* module, const ScriptSiteDef& s);  // the site's PC offset in a module (0: off), as ScriptSite finds it
 #endif
 
 enum RaceStatus : int32_t {

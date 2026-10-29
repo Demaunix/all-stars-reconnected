@@ -1,6 +1,31 @@
 Steam Multiplayer - changelog
 
 {VERSION}
+- Works next to mods that change the game's menu scripts in memory: the places in
+  the menu scripts the mod watches (the main menu's Steam-join check, the way back to
+  the lobby after a race, the pause and results menus, the HUD tags) are now found by
+  their contents, not by a fixed position, so another mod inserting a menu row before
+  them no longer switches them off. Such mods can check the DLL's export
+  AsrScriptSitesByPattern (returns 1).
+- Automatic updates: from this version on, the mod checks its GitHub page once at
+  game start, downloads a newer release and checks the author's signature and
+  every file; ChaoGarage 1.3.0 or newer puts it in place at the next game start.
+  The main menu says when a new version is ready, and once when it is in.
+  Your config.ini is kept. Turn it off with [Update] Auto=0 in config.ini
+  (README: SETTINGS).
+- Name tags: in online races the computer racers' karts now show their racer's name
+  too (the other players' karts show the player's name, as before).
+- Fair finish times: a game that couldn't keep up for a moment (a stutter, Alt+Tab)
+  dropped that time from its race clock, so its player got a better time than the race
+  really took and could be ranked ahead of someone who crossed the line first. Every
+  game's race clock now keeps real time from the countdown on (after a stutter the
+  HUD's race time jumps forward to catch up).
+- Fairer races between keyboard and controller players: while a keyboard player is
+  in the race, controllers steer with the stick OR the d-pad, never both added
+  together ("Drift+"). The lobby's rules panel shows DRIFT+ ON or OFF. Online races
+  only.
+- Metal Sonic 1.1.4: the lobby's A key picture (INVITE FRIENDS, VIEW PROFILE) shows
+  with Metal Sonic 1.1.4 too (and still with 1.1.2 and 1.1.3).
 - Fullscreen: a game that lost focus (Alt+Tab, a pop-up) could stay invisible when you
   clicked it on the taskbar. The mod no longer reads the keyboard or mouse while the
   game is minimized, and a failed read counts as "nothing pressed".

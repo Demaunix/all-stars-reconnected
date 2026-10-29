@@ -4,3 +4,8 @@ EXPORTS
     SsasrModRollback
     SteamMpTestPost
     SteamMpTestRead
+    SteamMpTestFigureEnable
+    AsrFigureQuery
+    AsrFigureFriends
+    AsrFigureSetSelf
+    AsrScriptSitesByPattern
