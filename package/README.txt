@@ -20,11 +20,11 @@ REQUIREMENTS
   without them can join too. A join with a different mod set is refused with a
   message naming the difference; SteamMultiplayer.log in this mod's folder lists
   every difference.
-- Metal Sonic: the standalone Metal Sonic 1.1.2 and the Roster Pack's Metal Sonic
-  both work online, but not with each other (their racer lists differ). The
-  Roster Pack's Metal Sonic needs the All-Stars Roster Pack, which every player
-  needs too, even when Metal is OFF. The standalone Metal Sonic 1.1.0 Beta 3 isn't
-  supported: update it to 1.1.2.
+- Metal Sonic: the standalone Metal Sonic (1.1.2 or newer, including 1.1.4) and the
+  Roster Pack's Metal Sonic both work online, but not with each other (their racer
+  lists differ). The Roster Pack's Metal Sonic needs the All-Stars Roster Pack,
+  which every player needs too, even when Metal is OFF. The standalone Metal Sonic
+  1.1.0 Beta 3 isn't supported: update it to 1.1.4.
 
 
 INSTALL
@@ -43,7 +43,9 @@ made for Metal Sonic's). If a later Metal Sonic changes them again, Metal Sonic'
 own version is used and only that picture or wording is missing.
 
 UNINSTALL
-Delete the folder <game folder>\mods\Steam Multiplayer\. Nothing else is changed.
+Delete the folder <game folder>\mods\Steam Multiplayer\, and <game folder>\mods-updates\
+if it is there (automatic updates keep their downloads and the replaced copy there).
+Nothing else is changed.
 
 
 HOW TO PLAY
@@ -97,6 +99,17 @@ HOW TO PLAY
   (START RACE, select), B = Esc (BACK), X = F1 (CHANGE RACER, a player's menu),
   Y = F2 (SETTINGS), the D-pad = the arrow keys. INVITE FRIENDS and push-to-talk
   are keyboard-only for now (see KNOWN ISSUES).
+- During the race, the karts near you carry name tags: the other players' names, and
+  each computer racer's racer name.
+- Finish times are real time on every PC: when a game stutters, its race clock catches
+  up afterwards (the race time on the HUD jumps forward), so the results follow the
+  order the karts really crossed the line.
+- Keyboard and controller players race fairly: a controller can steer with its stick
+  and its d-pad added together ("Drift+"), which turns harder than any keyboard can.
+  When a player who drives with the keyboard is in the race, every controller steers
+  with its stick OR its d-pad (the first one used keeps control until you let go).
+  The lobby's rules panel shows DRIFT+ ON or OFF. Only online races; single player
+  and local split screen are unchanged.
 
 
 SETTINGS (config.ini in this folder; read when the game starts)
@@ -124,6 +137,21 @@ Leave the [Race] settings at 1 unless you are looking into a problem.
   microphone choice applies: if you sound quiet or rough to the others, check
   Steam > Settings > Voice (the input device, its volume, noise suppression, and
   Steam's own microphone test there).
+- [Update] Auto=1 (the default): AUTOMATIC UPDATES. At game start the mod checks
+  this mod's GitHub page (github.com/Demaunix/all-stars-reconnected) once for a
+  newer release. If there is one, it downloads it in the background, checks the
+  author's signature and every file, and keeps it ready in <game folder>\mods-updates;
+  the next time you start the game, ChaoGarage (1.3.0 or newer) puts it in place
+  before any mod starts. The main menu says when a new version is ready (restart
+  the game to use it), and once when it is in. Your config.ini is kept. Everyone in a lobby needs the
+  same version, so this keeps you able to play with the others. It sends nothing
+  about you (GitHub sees your IP address, as with any download) and only ever
+  changes this mod's folder and mods-updates (the replaced copy waits in
+  mods-updates\previous until the next update). With an older ChaoGarage it only
+  says in SteamMultiplayer.log that a new version is out. It never updates
+  ChaoGarage or other mods. Auto=0 turns it off: then update by hand from the
+  GameBanana page (an update already downloaded still goes in at the next start;
+  delete <game folder>\mods-updates to cancel it).
 
 
 KNOWN ISSUES

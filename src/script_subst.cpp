@@ -128,7 +128,7 @@ static void __cdecl BeforeParse(uint8_t* pkg) {
         }
         Log(true, L"multiplayer menus: using our front-end scripts (fe_mainmenu, dialogs, results, fe_network_game: %s)",
             g_chosen[2] == kModNetRoster ? L"Roster Pack, 25 racers"
-            : g_chosen[2] == kModNetMetal ? L"Metal Sonic 1.1.2, 22 racers"
+            : g_chosen[2] == kModNetMetal ? L"the standalone Metal Sonic (1.1.2 or newer), 22 racers"
                                           : L"stock game, 21 racers");
 #ifndef SCRIPT_SUBST_TEST
         // The race contract maps lobby racer numbers through it.

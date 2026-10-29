@@ -34,10 +34,12 @@ def main() -> None:
     out = root / "out" / "release"
     out.mkdir(parents=True, exist_ok=True)
     zpath = out / f"SteamMultiplayer-{version}.zip"
-    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+    # STORED (no compression): the auto-update reads it with a few lines of its own (src/update.h); the game data inside is
+    # already compressed (1.1.0: 40.07 MB stored vs 39.06 MB deflated).
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_STORED) as z:
         for p in files:
             info = zipfile.ZipInfo("Steam Multiplayer/" + p.relative_to(mod).as_posix(), DATE)
-            info.compress_type = zipfile.ZIP_DEFLATED
+            info.compress_type = zipfile.ZIP_STORED
             info.external_attr = 0o644 << 16
             z.writestr(info, p.read_bytes())
     with zipfile.ZipFile(zpath) as z:

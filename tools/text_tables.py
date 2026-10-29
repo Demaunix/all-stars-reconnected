@@ -5,8 +5,9 @@ Metal Sonic's version (tools/package.py).
 
 Today: dialogs_EN.stz (file hash 9421F31B): "VIEW GAMER CARD" (BFB811CD) reads "VIEW STEAM PROFILE" (the lobby player popup's
 button; the user, 2026-10-23). The .stz entry is the same 6-section container as the scenes; its TEXT chunk ({tag, size, size2,
-0x44332211}, 8 more bytes, u32 count, (key, offset) pairs, NUL-terminated strings at offset + 16 from the chunk start; UTF-8, and
-our strings are ASCII, so the cp1252 encoding below writes the same bytes) is
+0x44332211}, 8 more bytes, u32 count, (key, offset) pairs, NUL-terminated strings at offset + 16 from the chunk start; UTF-8:
+all 641 strings of each language decode so, re\\update-dialogs\\FINDINGS.md; until 1.1.1 this tool wrote cp1252, the same bytes
+for its ASCII strings) is
 rebuilt with the new strings; everything else in the entry is copied as it is.
 
 M8 (the user's MUTE / UNMUTE, re\\m8-yellow\\FINDINGS.md 3): the dialogs key NOTHING (72259212, no definition or script uses it on
@@ -23,18 +24,31 @@ from pathlib import Path
 
 DIALOGS_EN = 0x9421F31B
 NOTHING, MUTE = 0x72259212, 0x51577208
+# 1.1.1, the auto-update's notices (re\\update-dialogs\\FINDINGS.md): two Wii-only bodies nothing on PC uses (Nintendo Wi-Fi
+# Connection messages), now the bodies of dialogs 9DC5CA23 / 75CF8F27 (tools\\build_menus.py DIALOG_EDITS).
+UPDATE_READY, UPDATE_DONE = 0x484F1E46, 0x74DF3842
 EDITS = {
-    DIALOGS_EN: {0xBFB811CD: "VIEW STEAM PROFILE", NOTHING: "UNMUTE"},
-    0x9AC5FB72: {NOTHING: "ACTIVER LE SON"},
-    0xF08557E0: {NOTHING: "TON AN", MUTE: "TON AUS"},
-    0x91EF54FD: {NOTHING: "ATTIVA AUDIO"},
-    0x55CB9117: {NOTHING: "ACTIVAR SONIDO"},
+    DIALOGS_EN: {0xBFB811CD: "VIEW STEAM PROFILE", NOTHING: "UNMUTE",
+                 UPDATE_READY: "A new version of Steam Multiplayer is ready. Restart the game to use it.",
+                 UPDATE_DONE: "Steam Multiplayer was updated to a new version."},
+    0x9AC5FB72: {NOTHING: "ACTIVER LE SON",
+                 UPDATE_READY: "Une nouvelle version de Steam Multiplayer est prête. Redémarre le jeu pour l'utiliser.",
+                 UPDATE_DONE: "Steam Multiplayer a été mis à jour vers une nouvelle version."},
+    0xF08557E0: {NOTHING: "TON AN", MUTE: "TON AUS",
+                 UPDATE_READY: "Eine neue Version von Steam Multiplayer ist bereit. Starte das Spiel neu, um sie zu verwenden.",
+                 UPDATE_DONE: "Steam Multiplayer wurde auf eine neue Version aktualisiert."},
+    0x91EF54FD: {NOTHING: "ATTIVA AUDIO",
+                 UPDATE_READY: "È pronta una nuova versione di Steam Multiplayer. Riavvia il gioco per usarla.",
+                 UPDATE_DONE: "Steam Multiplayer è stato aggiornato a una nuova versione."},
+    0x55CB9117: {NOTHING: "ACTIVAR SONIDO",
+                 UPDATE_READY: "Hay una nueva versión de Steam Multiplayer lista. Reinicia el juego para usarla.",
+                 UPDATE_DONE: "Steam Multiplayer se ha actualizado a una nueva versión."},
 }
-NAMES = {DIALOGS_EN: "dialogs text table (English): VIEW GAMER CARD reads VIEW STEAM PROFILE, NOTHING reads UNMUTE",
-         0x9AC5FB72: "dialogs text table (French): NOTHING reads ACTIVER LE SON (UNMUTE)",
-         0xF08557E0: "dialogs text table (German): NOTHING reads TON AN (UNMUTE), MUTE reads TON AUS",
-         0x91EF54FD: "dialogs text table (Italian): NOTHING reads ATTIVA AUDIO (UNMUTE)",
-         0x55CB9117: "dialogs text table (Spanish): NOTHING reads ACTIVAR SONIDO (UNMUTE)"}
+NAMES = {DIALOGS_EN: "dialogs text table (English): VIEW GAMER CARD reads VIEW STEAM PROFILE, NOTHING reads UNMUTE; the update notices",
+         0x9AC5FB72: "dialogs text table (French): NOTHING reads ACTIVER LE SON (UNMUTE); the update notices",
+         0xF08557E0: "dialogs text table (German): NOTHING reads TON AN (UNMUTE), MUTE reads TON AUS; the update notices",
+         0x91EF54FD: "dialogs text table (Italian): NOTHING reads ATTIVA AUDIO (UNMUTE); the update notices",
+         0x55CB9117: "dialogs text table (Spanish): NOTHING reads ACTIVAR SONIDO (UNMUTE); the update notices"}
 
 
 def read_text(dec: bytes) -> dict:
@@ -71,7 +85,7 @@ def patch_text(dec: bytes, edits: dict) -> bytes:
     body = bytearray()
     base = -(-(28 + 8 * n) // 16) * 16  # the strings start 16-aligned after the pairs, as in the original (12 zero bytes there)
     for key, s in strings:
-        data = edits[key].encode("cp1252") if key in edits else s
+        data = edits[key].encode("utf-8") if key in edits else s
         table += struct.pack("<II", key, base + len(body) - 16)
         body += data + b"\0"
     chunk = bytearray(dec[p : p + 28]) + table + bytes(base - 28 - 8 * n) + body
@@ -95,7 +109,7 @@ def patch_entry(entry: bytes, edits: dict) -> bytes:
         at = new.find(b"TEXT", at + 4)
     got, was = read_text(new[at:]), read_text(dec[at:])
     for key, text in edits.items():
-        assert dict(got)[key] == text.encode("cp1252")
+        assert dict(got)[key] == text.encode("utf-8")
     assert [(k, v) for k, v in got if k not in edits] == [(k, v) for k, v in was if k not in edits], "another string changed"
     return pack(zlib.compress(new, 9), len(new))
 
@@ -125,7 +139,7 @@ def main() -> None:
             at = dec.find(b"TEXT", at + 4)
         texts = dict(read_text(dec[at:]))
         for k in EDITS[key]:
-            print("%08X %08X %r" % (key, k, texts[k].decode("cp1252")))
+            print("%08X %08X %r" % (key, k, texts[k].decode("utf-8")))
         out = root / "build" / "tiles"
         out.mkdir(parents=True, exist_ok=True)
         (out / ("%08X.dat" % key)).write_bytes(patched)

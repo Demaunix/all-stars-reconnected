@@ -40,34 +40,42 @@ for op in group["operations"]:
 # and the Roster Pack layer), used when that is the installed content, and is optional: a Metal Sonic whose member differs (a later
 # update) keeps its own and only the A picture and the wording are missing, instead of the loader starting no mod.
 keys = root / "build" / "keys"
-METAL = "metal-sonic-1.1.0-beta.3"
+# Metal Sonic's versions of these members, each a base under reference\navigator-bases (file suffix for its variant payloads).
+# 1.1.4 (2026-10-27) adds "METAL SONIC" to its 7 navigator_info scenes; its other 19 members are 1.1.3's (= Beta 3's), so they
+# add no second variant (the loader refuses two variants over the same payload).
+METALS = {"metal-sonic-1.1.0-beta.3": ".metal-sonic.dat", "metal-sonic-1.1.4": ".metal-sonic-114.dat"}
 def keys_stamp():
     try:
         s = json.loads((keys / "keys.json").read_text(encoding="utf-8"))
         ok = s["tool_sha256"] == sha(root / "tools" / "footer_keys.py") and all(
             s["inputs"][name] == sha(root / "tools" / name) for name in ("steam_tiles.py", "text_tables.py", "dialog_icons.py", "scene_container.py", "lobby_bars.py",
                                                                         "egg_lobby.py", "mod_icons.py", "lobby_drift_row.py", "codexui/build_ui.py", "codexui/decode_ui_texture.py", "codexui/probe.py")) and all(
-            sha(keys / base / Path(op["payload"]).name) == op["payload_sha256"] for base, g in s["bases"].items() for op in g["operations"])
+            sha(keys / base / Path(op["payload"]).name) == op["payload_sha256"] for base, g in s["bases"].items() for op in g["operations"]) and all(
+            base in s["bases"] for base in METALS)
         return s if ok else None
     except (OSError, ValueError, KeyError):
         return None
 if not keys_stamp():
     subprocess.run([sys.executable, str(root / "tools" / "footer_keys.py"), str(root)], check=True, stdout=subprocess.DEVNULL)
 stamp = keys_stamp()
-metal = {op["key"]: op for op in stamp["bases"][METAL]["operations"]}
+metals = {base: {op["key"]: op for op in stamp["bases"][base]["operations"]} for base in METALS}
 tiles_keys = {op["key"] for op in group["operations"]}
 for op in stamp["bases"]["stock"]["operations"]:
-    assert op["key"] not in tiles_keys and op["key"] in metal, op["key"]
-    m = metal[op["key"]]
+    assert op["key"] not in tiles_keys and all(op["key"] in m for m in metals.values()), op["key"]
     payload = mod / op["payload"]
     payload.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(keys / "stock" / payload.name, payload)
-    variant = op["payload"].replace(".dat", ".metal-sonic.dat")
-    shutil.copy2(keys / METAL / Path(m["payload"]).name, mod / variant)
     entry = {k: v for k, v in op.items() if k != "facts"}
     entry["optional"] = True
-    entry["variants"] = [{"over_mod": "metal-sonic", "over_payload_sha256": m["base_stored_sha256"], "payload": variant,
-                          "payload_sha256": m["payload_sha256"], "stored_size": m["stored_size"]}]
+    entry["variants"] = []
+    for base, suffix in METALS.items():
+        m = metals[base][op["key"]]
+        if any(v["over_payload_sha256"] == m["base_stored_sha256"] for v in entry["variants"]):
+            continue  # (this Metal version's member is an earlier one's: that variant serves both)
+        variant = op["payload"].replace(".dat", suffix)
+        shutil.copy2(keys / base / Path(m["payload"]).name, mod / variant)
+        entry["variants"].append({"over_mod": "metal-sonic", "over_payload_sha256": m["base_stored_sha256"], "payload": variant,
+                                  "payload_sha256": m["payload_sha256"], "stored_size": m["stored_size"]})
     group["operations"].append(entry)
 sys.path.insert(0, str(root / "tools"))
 import xpac  # noqa: E402  (the archive's rows and the composed-archive hash, standard library only)

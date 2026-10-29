@@ -11,8 +11,12 @@ Labels: CONFIRMED (read in a source) / INFERRED / UNKNOWN.
 - ChaoGarage never contacts the network today (ChaoGarage's `docs/DESIGN.md` line 34; CONFIRMED); SHA256SUMS.txt "is not a
   signature" (line 36). The dinput8 + ChaoGarage pair refuses to load if the two come from different releases (line 10): an update
   replaces the whole pair.
-- **GameBanana's rules: UNKNOWN** (the rules / submission-rules wiki pages didn't render for the researcher:
-  https://gamebanana.com/rules, https://gamebanana.com/wikis/cats/51). Read them by hand or ask staff BEFORE shipping. For
+- **GameBanana's rules (read 2026-10-27 in Chrome: https://gamebanana.com/rules and the Mods section rules
+  https://gamebanana.com/wikis/2058; CONFIRMED):** no rule mentions mods that connect to the internet or update themselves.
+  The ones that could touch an updater: R.29 Malware, R.31 "Cheats, Hacks" (mods that execute "specific system-level
+  commands"; aimed at harmful ones), R.40 File Analysis Failure (uploads are scanned: a downloader in the DLL could be
+  flagged), R.13 Admin Discretion; R.23: credits go in the Credits module, hyperlinked. So (INFERRED): allowed, but opt-in,
+  disclosed on the page, touching only the mod's own folder; asking a moderator before shipping is still the safe step. For
   comparison, Nexus prohibits files that "connect to the internet to download or send information" unless crucial
   (https://help.nexusmods.com/article/28-file-submission-guidelines). Safest framing (INFERRED): opt-in check, downloads only what
   the player approves, disclosed on the page.

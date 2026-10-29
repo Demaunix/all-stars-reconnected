@@ -183,6 +183,9 @@ void LobbySetHostMods(bool metalOn, bool eggOn);
 // frame), for the member data "inp".
 enum : int32_t { kInputUnknown = 0, kInputKeyboard = 1, kInputController = 2 };  // (0: a zeroed member is unknown)
 void LobbyNoteInput(int32_t kind);
+// A race's racers are being created (game thread, from the racer-creation hook; any race, online or not): the friend figures
+// (figure_presence.h) are gathered and logged once for this race, as a racer mod would read them at its race load.
+void LobbyNoteRaceStart();
 constexpr uint32_t kLobbyAwayMs = 700;
 // seen = the last lobby frame's GetTickCount | 1 (0: none yet), now = the worker's GetTickCount. Signed: in the same
 // clock step as the frame, now can be seen - 1 (m7o compared unsigned: 0xffffffff ms "away" while at the lobby).

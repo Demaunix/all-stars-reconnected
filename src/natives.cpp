@@ -889,6 +889,7 @@ static void __fastcall Dispatch(void* vm, void* /*edx*/, uint32_t id, void* desc
         g_wrongThreadLogged = true;
         return;
     }
+    if ((id & 0xff) == kNatJoinPoll) RaceMainMenuJoinCheck(vm);  // (the auto-update's notices; it checks the call site itself)
     Handle((Descriptor*)desc);
 }
 

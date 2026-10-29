@@ -30,9 +30,11 @@
 #include "search_rows.h"
 #include "race.h"
 #include "fingerprint.h"
+#include "update.h"
+#include "figure_presence.h"
 
 #define MOD_NAME L"Steam Multiplayer"
-#define MOD_VERSION "1.1.1-dp9"
+#define MOD_VERSION "1.1.1"
 static const uint32_t kAppId = 34190;
 // sdk/redistributable_bin/steam_api.dll from Steamworks SDK 1.65 (32-bit).
 static const char kSteamApiSha256[] = "1cb8b7cb77923762d4e49b27e44295369a79e93b5d4282c5e840b268d28fe771";
@@ -94,6 +96,9 @@ static HMODULE g_steamApi = nullptr;
 
 static FARPROC WINAPI DelayHook(unsigned notify, PDelayLoadInfo info) {
     if (notify == dliNotePreLoadLibrary && g_steamApi && _stricmp(info->szDll, "steam_api.dll") == 0) return (FARPROC)g_steamApi;
+    // The auto-update's internet functions: Windows' own copy only (never one placed in the game folder).
+    if (notify == dliNotePreLoadLibrary && _stricmp(info->szDll, "winhttp.dll") == 0)
+        return (FARPROC)LoadLibraryExW(L"winhttp.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     return nullptr;
 }
 extern "C" const PfnDliHook __pfnDliNotifyHook2 = DelayHook;
@@ -190,6 +195,28 @@ static const char kModsKey[] = "mods";
 static const char kProtoKey[] = "asr_proto";
 static const char kProto[] = "1";
 
+// ---------------------------------------------------------------- friend figures (figure_presence.h, notes\FIGURE-FRIENDS.md)
+// This player's figure (config.ini [Friends] Figure, or what a racer mod set through AsrFigureSetSelf) and the friends the worker
+// found with theirs. One lock that needs no set-up (SRWLOCK_INIT), so the exports are safe before SsasrModInitialize.
+static SRWLOCK g_figureLock = SRWLOCK_INIT;
+static FigureDesign g_figureSelf;
+static bool g_figureFollowConfig = true;  // (under the lock) the figure is config.ini's, not one a mod set (AsrFigureSetSelf)
+static int32_t g_figureConfigBuiltin = kFigureDefaultBuiltin;
+static volatile LONG g_figureSelfRev = 0;  // bumped by every change of g_figureSelf (the worker republishes)
+static FigureFriendRec g_figureFriends[kFigureFriendsMax];
+static int g_figureFriendCount = 0;
+static volatile LONG g_figureWorker = 0;  // 1 while the worker runs (SetSteamUp); else AsrFigureFriends answers -1
+// The switch: config.ini [Friends] Enabled=1 (read at start; not in the shipped config.ini). Off by default: the user's decision of
+// 2026-10-28 (1.1.1 ships without the feature until its own two-account test). Off = nothing published, nothing gathered, the
+// exports answer "unavailable" (enabled 0, AsrFigureFriends -1, AsrFigureSetSelf 0) without touching Steam.
+static bool g_figureEnabled = false;
+static volatile LONG g_figureRaceStart = 0;  // a race's racers are being created (LobbyNoteRaceStart): the worker gathers once for it
+static DWORD g_figureRaceNoted = 0;          // game thread: when the last race's creation was noted (its racer calls count once)
+// The exports (defined with the other entry points at the end): the worker calls them at a race start to log what a caller would
+// get at that moment (the in-game evidence for the export without a mod that calls it).
+extern "C" int __cdecl AsrFigureQuery(AsrFigureInfo* out, int size);
+extern "C" int __cdecl AsrFigureFriends(AsrFigureFriend* out, int max);
+
 // ---------------------------------------------------------------- mailbox (game thread <-> worker)
 static CRITICAL_SECTION g_boxLock;
 static bool g_steamUp = false;  // worker accepts commands
@@ -237,6 +264,14 @@ void LobbyNoteFlag(int32_t code) { InterlockedExchange(&g_localFlag, code); }
 static volatile LONG g_localInput = kInputUnknown;
 void LobbyNoteInput(int32_t kind) { InterlockedExchange(&g_localInput, kind); }
 static const char* InputData(int32_t kind) { return kind == kInputKeyboard ? "k" : kind == kInputController ? "c" : ""; }
+void LobbyNoteRaceStart() {
+    DWORD now = GetTickCount() | 1;
+    bool same = g_figureRaceNoted && now - g_figureRaceNoted < 3000;  // the racer calls of one race come within a few frames
+    g_figureRaceNoted = now;
+    if (same) return;
+    InterlockedExchange(&g_figureRaceStart, 1);
+    if (g_wake) SetEvent(g_wake);
+}
 // (g_mods is written once at start-up, before any menu runs.)
 bool LobbyModInstalled(const char* id) { return g_modsOk && ModListed(g_mods, id); }
 void LobbySetHostMods(bool metalOn, bool eggOn) {
@@ -351,6 +386,12 @@ static int TakeCommands(Command* out, int max) {
 }
 
 static void SetSteamUp(bool up) {
+    InterlockedExchange(&g_figureWorker, up ? 1 : 0);
+    if (!up) {  // (no worker: no friends known; AsrFigureFriends answers -1 and AsrFigureQuery counts 0)
+        AcquireSRWLockExclusive(&g_figureLock);
+        g_figureFriendCount = 0;
+        ReleaseSRWLockExclusive(&g_figureLock);
+    }
     EnterCriticalSection(&g_boxLock);
     g_steamUp = up;
     if (!up) g_cmdCount = 0;
@@ -382,6 +423,9 @@ public:
         m_online = SteamUser()->BLoggedOn();
         if (!m_online) Log(true, L"Steam is not connected to the Steam servers (offline mode?): online games can't be found or hosted until it is");
         m_voice.Configure(g_configIni.c_str());
+        m_figureSelfRev = InterlockedCompareExchange(&g_figureSelfRev, 0, 0);
+        WriteFigurePresence(true);
+        GatherFigureFriends(nullptr);
         Publish();
         if (m_coldJoin) {
             Log(true, L"cold join: launched with +connect_lobby %llu; joined once this player has picked a license", m_coldJoin);
@@ -491,6 +535,7 @@ public:
             Publish();
         }
         PollNewHost();
+        if (g_figureEnabled) TickFigures();  // friend figures (off by default: config.ini [Friends] Enabled)
     }
 
     // No new operations after this; results still in flight are left when they arrive.
@@ -774,6 +819,8 @@ private:
         m_rules = kNoRules;
         SteamFriends()->ClearRichPresence();
         m_presence[0] = 0;
+        WriteFigurePresence(true);  // (ClearRichPresence took every key, the figure's too)
+        m_figureMemberLobby = 0;    // (a member's data goes with its membership: a rejoin writes it again)
     }
 
     // ---- host migration (M7). Steam keeps a lobby whose owner left and makes another member its owner
@@ -903,8 +950,256 @@ private:
         SteamMatchmaking()->SetLobbyMemberData(m_lobby, "inp", InputData(m_postedInput));
         for (LobbyMember& m : m_members)
             if (m.isMe) m.input = m_postedInput;
+        WriteFigureMemberData(false);
     }
     int32_t m_postedInput = kInputUnknown;
+
+    // ---- friend figures (figure_presence.h, notes\FIGURE-FRIENDS.md). This player's figure goes out as rich presence (and as
+    // member data in a lobby); the friends' figures are gathered every kFigureGatherMs, a second after Steam reports a change
+    // (presence, who plays what), and once at every race's start, for the AsrFigureFriends export (a racer mod reads it at race
+    // load). Only Steam friends count (a lobby member who isn't one is left out); the player itself never.
+    static const DWORD kFigureGatherMs = 5000, kFigureAskAgainMs = 60000;
+
+    static FigureDesign SelfDesign() {
+        AcquireSRWLockShared(&g_figureLock);
+        FigureDesign d = g_figureSelf;
+        ReleaseSRWLockShared(&g_figureLock);
+        return d;
+    }
+
+    // Every pump while the feature is on: republish this player's figure when a racer mod changed it; gather the friends every few
+    // seconds, soon after Steam reported a change, and once at every race's start (logged then).
+    void TickFigures() {
+        LONG selfRev = InterlockedCompareExchange(&g_figureSelfRev, 0, 0);
+        if (selfRev != m_figureSelfRev) {
+            m_figureSelfRev = selfRev;
+            WriteFigurePresence(false);
+            WriteFigureMemberData(false);
+        }
+        bool racing = InterlockedCompareExchange(&g_raceActive, 0, 0) != 0;
+        if (racing != m_figureRacing) {
+            m_figureRacing = racing;
+            if (racing) GatherFigureFriends(L"the race start");  // (an online race: its pipe went active, before its racers are made)
+        }
+        DWORD now = GetTickCount();
+        if (InterlockedExchange(&g_figureRaceStart, 0) && !racing) {
+            GatherFigureFriends(L"the race start");  // this race's racers are being created (an online race gathered at its pipe already)
+        } else if (!racing && ((m_figureDirty && now - m_figureGathered >= 1000) || now - m_figureGathered >= kFigureGatherMs)) {
+            GatherFigureFriends(nullptr);  // (not during an online race: its pump runs every few ms, and nothing shows friends then)
+        }
+    }
+
+    // Rich presence: the header and, for a description, its chunks (a built-in deletes chunks set earlier).
+    void WriteFigurePresence(bool force) {
+        if (!g_figureEnabled) return;
+        FigureDesign d = SelfDesign();
+        std::string header = EncodeFigureHeader(d);
+        bool changed = header != m_figurePresence || !FigureDesignSame(d, m_figurePresenceDesign);
+        if (!force && !changed) return;
+        std::string chunks[kFigureChunks];
+        EncodeFigureChunks(d, chunks);
+        bool ok = true;  // the chunks first, the header last (a reader that sees them half-updated has the header's CRC to refuse the mix)
+        for (int i = 0; i < kFigureChunks; ++i)
+            if (!chunks[i].empty() || m_figureChunksSet) ok = SteamFriends()->SetRichPresence(kFigureChunkKeys[i], chunks[i].c_str()) && ok;
+        ok = SteamFriends()->SetRichPresence(kFigureKey, header.c_str()) && ok;
+        m_figureChunksSet = !chunks[0].empty();
+        m_figurePresence = header;
+        m_figurePresenceDesign = d;
+        if (!ok) {
+            Log(true, L"figure: Steam refused the rich presence %hs=\"%hs\"", kFigureKey, header.c_str());
+        } else if (changed || !m_figurePresenceLogged) {
+            m_figurePresenceLogged = true;
+            if (d.builtin >= 0)
+                Log(true, L"figure: this player's figure is built-in %d; published as rich presence %hs=\"%hs\" for friends' games", d.builtin,
+                    kFigureKey, header.c_str());
+            else
+                Log(true, L"figure: this player's figure is a %d-byte description; published as rich presence %hs=\"%hs\" and %hs..", d.descSize,
+                    kFigureKey, header.c_str(), kFigureChunkKeys[0]);
+        }
+    }
+
+    // Lobby member data: the same strings (a joiner reads them with the lobby's data, before any presence arrives).
+    void WriteFigureMemberData(bool force) {
+        if (!g_figureEnabled || !m_lobby.IsValid()) return;
+        FigureDesign d = SelfDesign();
+        std::string header = EncodeFigureHeader(d);
+        uint64_t lobby = m_lobby.ConvertToUint64();
+        bool sameLobby = lobby == m_figureMemberLobby;
+        if (!force && sameLobby && header == m_figureMember && FigureDesignSame(d, m_figureMemberDesign)) return;
+        std::string chunks[kFigureChunks];
+        EncodeFigureChunks(d, chunks);
+        ISteamMatchmaking* mm = SteamMatchmaking();
+        for (int i = 0; i < kFigureChunks; ++i)  // (the chunks first, the header last, as the presence)
+            if (!chunks[i].empty() || (sameLobby && m_figureMemberChunksSet)) mm->SetLobbyMemberData(m_lobby, kFigureChunkKeys[i], chunks[i].c_str());
+        mm->SetLobbyMemberData(m_lobby, kFigureKey, header.c_str());
+        m_figureMemberChunksSet = !chunks[0].empty();
+        m_figureMemberLobby = lobby;
+        m_figureMember = header;
+        m_figureMemberDesign = d;
+        Log(false, L"figure: member data %hs=\"%hs\" written to lobby %llu", kFigureKey, header.c_str(), lobby);
+    }
+
+    // The n-th design seen this run (the others' order: newest first); a friend whose design went and came back is new again.
+    uint32_t FigureSeenOrder(uint64_t id) {
+        for (const auto& s : m_figureSeen)
+            if (s.first == id) return s.second;
+        m_figureSeen.push_back({id, ++m_figureSeenNext});
+        return m_figureSeenNext;
+    }
+
+    // Whether to ask Steam for this friend's presence now (once a minute per friend without the key).
+    bool FigureAskNow(uint64_t id, DWORD now) {
+        for (auto& a : m_figureAsked) {
+            if (a.first != id) continue;
+            if (now - a.second < kFigureAskAgainMs) return false;
+            a.second = now;
+            return true;
+        }
+        m_figureAsked.push_back({id, now});
+        return true;
+    }
+
+    // A friend whose value this build can't read (another mod version, or a figure change half-way through Steam): said once per
+    // friend per run; the friend is left out until a later gather reads it.
+    void NoteBadFigure(uint64_t id, const char* name, const char* header) {
+        if (std::find(m_figureBad.begin(), m_figureBad.end(), id) != m_figureBad.end()) return;
+        m_figureBad.push_back(id);
+        Log(true, L"figure: %s's (%llu) %hs value \"%hs\" is unreadable here (another mod version, or a change in progress); left out of the friend figures",
+            Widen(name).c_str(), id, kFigureKey, header);
+    }
+
+    // The friends running the game with this mod, with their designs: this lobby's friends first (their member data, in from the
+    // join; the presence as a fallback), then every friend whose game publishes the key. A friend in the game without the key yet
+    // is asked for its presence (Steam shares presence between friends in the same game by itself; this covers the first look).
+    // `why` (the race start) logs the result even when unchanged.
+    void GatherFigureFriends(const wchar_t* why) {
+        if (!g_figureEnabled) return;
+        DWORD now = GetTickCount();
+        m_figureGathered = now;
+        m_figureDirty = false;
+        ISteamFriends* fr = SteamFriends();
+        ISteamMatchmaking* mm = SteamMatchmaking();
+        CSteamID me = SteamUser()->GetSteamID();
+        std::vector<FigureFriendRec> found;
+        std::vector<uint64_t> inGame;  // friends with the game running (the asked-for-presence list is pruned to them)
+        int asked = 0;
+        auto str = [](const char* s) { return std::string(s ? s : ""); };  // (Steam answers "" for an unset value; never trust a null)
+        // One source (a header and its chunks) into r; false = no or unreadable figure there.
+        auto decode = [&](const std::string& header, const std::string (&chunks)[kFigureChunks], FigureFriendRec& r) {
+            const char* cp[kFigureChunks];
+            for (int k = 0; k < kFigureChunks; ++k) cp[k] = chunks[k].c_str();
+            return DecodeFigure(header.c_str(), cp, r.version, r.design);
+        };
+        auto keep = [&](CSteamID id, const char* name, FigureFriendRec& r, bool lobby, int seat) {
+            r.id = id.ConvertToUint64();
+            CopyUtf8Name(r.name, sizeof(r.name), name);
+            r.sameLobby = lobby;
+            r.seat = seat;
+            found.push_back(r);
+        };
+        if (m_lobby.IsValid() && m_state == kLobbyInLobby) {
+            for (size_t i = 0; i < m_members.size(); ++i) {
+                const LobbyMember& m = m_members[i];
+                if (m.isMe || IsTestPlayer(m.id)) continue;
+                CSteamID id((uint64)m.id);
+                if (fr->GetFriendRelationship(id) != k_EFriendRelationshipFriend) continue;
+                inGame.push_back(m.id);
+                // Its member data (in with the lobby's data at the join); its presence when that is missing or unreadable.
+                std::string header = str(mm->GetLobbyMemberData(m_lobby, id, kFigureKey)), chunks[kFigureChunks];
+                for (int k = 0; k < kFigureChunks; ++k) chunks[k] = str(mm->GetLobbyMemberData(m_lobby, id, kFigureChunkKeys[k]));
+                FigureFriendRec r;
+                bool ok = decode(header, chunks, r);
+                if (!ok) {
+                    std::string ph = str(fr->GetFriendRichPresence(id, kFigureKey)), pc[kFigureChunks];
+                    for (int k = 0; k < kFigureChunks; ++k) pc[k] = str(fr->GetFriendRichPresence(id, kFigureChunkKeys[k]));
+                    ok = !ph.empty() && decode(ph, pc, r);
+                    if (header.empty()) header = ph;
+                }
+                if (ok) keep(id, m.name, r, true, (int)i);
+                else if (!header.empty()) NoteBadFigure(m.id, m.name, header.c_str());
+            }
+        }
+        int n = fr->GetFriendCount(k_EFriendFlagImmediate);
+        for (int i = 0; i < n; ++i) {
+            CSteamID f = fr->GetFriendByIndex(i, k_EFriendFlagImmediate);
+            uint64_t id = f.ConvertToUint64();
+            if (f == me || std::find(inGame.begin(), inGame.end(), id) != inGame.end()) continue;
+            FriendGameInfo_t g;
+            if (!fr->GetFriendGamePlayed(f, &g) || g.m_gameID.AppID() != kAppId) continue;
+            inGame.push_back(id);
+            std::string header = str(fr->GetFriendRichPresence(f, kFigureKey)), chunks[kFigureChunks];
+            if (header.empty()) {
+                if (FigureAskNow(id, now)) {
+                    fr->RequestFriendRichPresence(f);
+                    ++asked;
+                }
+                continue;
+            }
+            for (int k = 0; k < kFigureChunks; ++k) chunks[k] = str(fr->GetFriendRichPresence(f, kFigureChunkKeys[k]));
+            FigureFriendRec r;
+            if (decode(header, chunks, r)) keep(f, fr->GetFriendPersonaName(f), r, false, 0);
+            else NoteBadFigure(id, fr->GetFriendPersonaName(f), header.c_str());
+        }
+        m_figureAsked.erase(std::remove_if(m_figureAsked.begin(), m_figureAsked.end(),
+                                           [&](const std::pair<uint64_t, DWORD>& a) { return std::find(inGame.begin(), inGame.end(), a.first) == inGame.end(); }),
+                            m_figureAsked.end());
+        for (FigureFriendRec& r : found) r.order = FigureSeenOrder(r.id);
+        // (a friend keeps its place while its game runs, even through a value one gather couldn't read; gone from the game = new next time)
+        m_figureSeen.erase(std::remove_if(m_figureSeen.begin(), m_figureSeen.end(),
+                                          [&](const std::pair<uint64_t, uint32_t>& s) { return std::find(inGame.begin(), inGame.end(), s.first) == inGame.end(); }),
+                           m_figureSeen.end());
+        OrderFigureFriends(found);
+        bool changed = FigureFriendsDiffer(found, m_figureFound);
+        m_figureFound = found;
+        AcquireSRWLockExclusive(&g_figureLock);
+        g_figureFriendCount = (int)found.size();
+        for (size_t i = 0; i < found.size(); ++i) g_figureFriends[i] = found[i];
+        ReleaseSRWLockExclusive(&g_figureLock);
+        if (why) {  // what a racer mod's call would answer right now (they show up to 4)
+            AsrFigureInfo info = {};
+            AsrFigureFriend four[4];
+            int got = AsrFigureQuery(&info, sizeof(info)) == (int)sizeof(info) ? AsrFigureFriends(four, 4) : -2;
+            std::string names;
+            for (int i = 0; i < got; ++i) names += std::string(i ? ", " : "") + four[i].name + (four[i].builtin >= 0 ? " built-in " + std::to_string(four[i].builtin) : " (a description)");
+            Log(true, L"figure export at %s: AsrFigureFriends(4) = %d%s%s (steamUp %d, inLobby %d, racingOnline %d, this player built-in %d)", why, got,
+                got > 0 ? L": " : L"", Widen(names.c_str()).c_str(), info.steamUp, info.inLobby, info.racingOnline, info.selfBuiltin);
+        }
+        if (!changed && !why) return;
+        int lobby = 0;
+        std::string list;
+        for (size_t i = 0; i < found.size(); ++i) {
+            if (found[i].sameLobby) ++lobby;
+            if (i < 8) list += (i ? "; " : "") + DescribeFigureFriend(found[i]);
+            else if (i == 8) list += "; ...";
+        }
+        if (found.empty())
+            Log(true, L"figure friends%s%s: none (%u friend(s) in the game%s)", why ? L" at " : L"", why ? why : L"", (unsigned)inGame.size(),
+                asked ? L"; their presence was asked for" : L"");
+        else
+            Log(true, L"figure friends%s%s: %u with a figure (%d in this lobby) of %u friend(s) in the game: %s", why ? L" at " : L"", why ? why : L"",
+                (unsigned)found.size(), lobby, (unsigned)inGame.size(), Widen(list.c_str()).c_str());
+    }
+
+    STEAM_CALLBACK(Session, OnFriendRichPresence, FriendRichPresenceUpdate_t) {
+        if (pParam->m_nAppID == kAppId) m_figureDirty = true;
+    }
+    STEAM_CALLBACK(Session, OnPersonaStateChange, PersonaStateChange_t) {
+        if (pParam->m_nChangeFlags & (k_EPersonaChangeGamePlayed | k_EPersonaChangeGoneOffline | k_EPersonaChangeComeOnline |
+                                      k_EPersonaChangeRichPresence | k_EPersonaChangeName | k_EPersonaChangeRelationshipChanged))
+            m_figureDirty = true;
+    }
+    std::string m_figurePresence, m_figureMember;         // the headers last written (presence; member data of m_figureMemberLobby)
+    FigureDesign m_figurePresenceDesign, m_figureMemberDesign;
+    bool m_figureChunksSet = false, m_figureMemberChunksSet = false, m_figurePresenceLogged = false;
+    uint64_t m_figureMemberLobby = 0;
+    LONG m_figureSelfRev = 0;
+    bool m_figureRacing = false, m_figureDirty = true;
+    DWORD m_figureGathered = 0;
+    std::vector<FigureFriendRec> m_figureFound;           // the last gather, in the export's order (the change log's reference)
+    std::vector<std::pair<uint64_t, uint32_t>> m_figureSeen;
+    uint32_t m_figureSeenNext = 0;
+    std::vector<std::pair<uint64_t, DWORD>> m_figureAsked;
+    std::vector<uint64_t> m_figureBad;
 
     // Race connections need this game's Steam certificate, which can come minutes after the game
     // starts ("Cert request failed ... not logged into Steam" until then; seen 2026-10-20). The
@@ -1209,6 +1504,7 @@ private:
         m_presenceMembers = n;
         WritePresence();
         SteamFriends()->SetRichPresence("connect", (std::string("+connect_lobby ") + id).c_str());
+        m_figureDirty = true;  // (the lobby's friends and their seats changed)
     }
 
     // Rich presence "status" (the friends list): the console's "In a network lobby" / "In a network game" (dialogs 4BA9303C /
@@ -1589,6 +1885,15 @@ extern "C" HRESULT __cdecl SsasrModInitialize(const SsasrHostApiV1* api, const w
     std::wstring dir = modDir;
     g_logPath = dir + L"\\SteamMultiplayer.log";
     Log(false, L"---- " MOD_NAME L" " TEXT(MOD_VERSION) L" starting, pid %lu", GetCurrentProcessId());
+    // Friend figures: the switch, and this player's figure from config.ini (unless a racer mod set one already through AsrFigureSetSelf).
+    g_figureEnabled = GetPrivateProfileIntW(L"Friends", L"Enabled", 0, (dir + L"\\config.ini").c_str()) != 0;
+    if (g_figureEnabled) Log(true, L"figure: friend figures are on (config.ini [Friends] Enabled=1)");
+    else Log(false, L"figure: friend figures are off (config.ini [Friends] Enabled, default 0): nothing is published or gathered; the exports answer unavailable");
+    g_figureConfigBuiltin = FigureConfigBuiltin((dir + L"\\config.ini").c_str());
+    AcquireSRWLockExclusive(&g_figureLock);
+    if (g_figureFollowConfig) g_figureSelf.builtin = g_figureConfigBuiltin;
+    ReleaseSRWLockExclusive(&g_figureLock);
+    AutoUpdateStart(dir, MOD_VERSION);  // (first: an update can also mend an install whose Steam part fails below)
     BackgroundInstall(api->game_image, dir);
     // Our menu scripts call the group-0x7A natives, so they are only substituted when those exist.
     if (NativesInstall(api->game_image)) {
@@ -1666,6 +1971,7 @@ extern "C" HRESULT __cdecl SsasrModRollback() {
     RaceRollback();
     ScriptSubstRollback();
     NativesRollback();
+    AutoUpdateStop();  // (up to 20 s; the DLL is pinned if its thread is still busy)
     if (g_thread) {
         SetEvent(g_stop);
         if (WaitForSingleObject(g_thread, 10000) != WAIT_OBJECT_0) return S_OK;
@@ -1681,3 +1987,64 @@ extern "C" HRESULT __cdecl SsasrModRollback() {
 // menu natives use.
 extern "C" int __cdecl SteamMpTestPost(int kind, int arg) { return LobbyPost((LobbyCommandKind)kind, arg) ? 1 : 0; }
 extern "C" void __cdecl SteamMpTestRead(LobbySnapshot* out) { if (out) LobbyRead(*out); }
+// tests/test_figure.cpp: the friend figures' switch, as config.ini [Friends] Enabled would set it (the game never calls this).
+extern "C" void __cdecl SteamMpTestFigureEnable(int on) { g_figureEnabled = on != 0; }
+
+// ---------------------------------------------------------------- the friend-figure exports (figure_presence.h, notes\FIGURE-FRIENDS.md)
+// Any thread, any time: the lock needs no set-up, so a call before SsasrModInitialize or with Steam off is answered too (Steam off:
+// no friends, -1). Players without a mod that calls these see no change.
+extern "C" int __cdecl AsrFigureQuery(AsrFigureInfo* out, int size) {
+    if (!out || size <= 0) return 0;
+    AsrFigureInfo info = {};
+    info.abi = kAsrFigureAbi;
+    info.friendSize = sizeof(AsrFigureFriend);
+    info.featureVersion = kFigureFeatureVersion;
+    bool on = g_figureEnabled;
+    bool up = on && InterlockedCompareExchange(&g_figureWorker, 0, 0) != 0;
+    info.enabled = on ? 1 : 0;
+    info.steamUp = up ? 1 : 0;
+    if (up) {  // (the mailbox lock exists once the worker ran)
+        EnterCriticalSection(&g_boxLock);
+        info.inLobby = g_snap.state == kLobbyInLobby ? 1 : 0;
+        LeaveCriticalSection(&g_boxLock);
+    }
+    info.racingOnline = InterlockedCompareExchange(&g_raceActive, 0, 0) ? 1 : 0;
+    AcquireSRWLockShared(&g_figureLock);
+    info.selfBuiltin = g_figureSelf.builtin;
+    info.selfDescSize = g_figureSelf.descSize;
+    info.friendCount = up ? (uint32_t)g_figureFriendCount : 0;
+    ReleaseSRWLockShared(&g_figureLock);
+    info.selfSteamId = g_selfId;
+    memcpy(out, &info, (size_t)size < sizeof(info) ? (size_t)size : sizeof(info));
+    return (int)sizeof(AsrFigureInfo);
+}
+
+extern "C" int __cdecl AsrFigureFriends(AsrFigureFriend* out, int max) {
+    if (!g_figureEnabled || !InterlockedCompareExchange(&g_figureWorker, 0, 0)) return -1;
+    if (!out || max <= 0) return 0;
+    AcquireSRWLockShared(&g_figureLock);
+    int n = g_figureFriendCount < max ? g_figureFriendCount : max;
+    for (int i = 0; i < n; ++i) FigureFriendOut(g_figureFriends[i], out[i]);
+    ReleaseSRWLockShared(&g_figureLock);
+    return n;
+}
+
+extern "C" int __cdecl AsrFigureSetSelf(int builtin) {
+    if (!g_figureEnabled || builtin < -1 || builtin >= kFigureBuiltins) return 0;
+    AcquireSRWLockExclusive(&g_figureLock);
+    g_figureSelf = FigureDesign();
+    g_figureFollowConfig = builtin < 0;
+    g_figureSelf.builtin = builtin < 0 ? g_figureConfigBuiltin : builtin;  // (before SsasrModInitialize read config.ini: the default; the file's after)
+    int now = g_figureSelf.builtin;
+    ReleaseSRWLockExclusive(&g_figureLock);
+    InterlockedIncrement(&g_figureSelfRev);
+    if (g_wake) SetEvent(g_wake);
+    Log(false, L"figure: a mod set this player's figure to built-in %d%s", now, builtin < 0 ? L" (config.ini's)" : L"");
+    return 1;
+}
+
+// For a mod that rebuilds a front-end script module in memory (a row or a line inserted before one of our script call sites,
+// e.g. in fe_mainmenu or front_main): 1 = this build finds its sites by their bytes (race.cpp ScriptSite, 1.1.1-dp13 and later),
+// so such an insertion moves nothing of ours off; a build without this export pinned them by offset. A constant: safe to call at
+// any time, from any thread.
+extern "C" int __cdecl AsrScriptSitesByPattern() { return 1; }
