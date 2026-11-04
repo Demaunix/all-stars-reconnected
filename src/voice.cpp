@@ -146,8 +146,9 @@ void VoiceChat::Record(const uint64_t* peers, int peerCount, bool active, bool o
 
 void VoiceChat::Receive(const uint64_t* peers, int peerCount, uint32_t now) {
     SteamNetworkingMessage_t* in[16];
-    int n;
-    while ((n = SteamNetworkingMessages()->ReceiveMessagesOnChannel(kVoiceChannel, in, 16)) > 0) {
+    int n, taken = 0;
+    while (taken < 1024 && (n = SteamNetworkingMessages()->ReceiveMessagesOnChannel(kVoiceChannel, in, 16)) > 0) {  // (the rest: next loop)
+        taken += n;
         for (int i = 0; i < n; ++i) {
             uint64_t from = in[i]->m_identityPeer.GetSteamID64();
             bool member = false;
@@ -155,10 +156,14 @@ void VoiceChat::Receive(const uint64_t* peers, int peerCount, uint32_t now) {
             uint16_t seq = 0;
             const uint8_t* data = nullptr;
             uint32_t len = 0;
-            bool packet = member && m_mode != kVoiceOff && VoiceDecode((const uint8_t*)in[i]->m_pData, (size_t)in[i]->m_cbSize, seq, data, len);
+            bool firstDrop = false;
+            bool budget = member && m_mode != kVoiceOff && m_budget.Take(from, now, &firstDrop);
+            bool packet = budget && VoiceDecode((const uint8_t*)in[i]->m_pData, (size_t)in[i]->m_cbSize, seq, data, len);
             VoiceTalker* t = packet ? TalkerFor(from, peers, peerCount, now) : nullptr;
             if (m_mode == kVoiceOff) {
                 // (drained and dropped: voice chat is off here)
+            } else if (member && !budget) {
+                if (firstDrop && ++m_overBudget <= 3) Log(true, L"voice: packets from %llu dropped: more than %.0f a second", from, kNetRatePerSecond);
             } else if (!t) {
                 if (++m_badPackets <= 3) Log(false, L"voice: a packet from %llu ignored (%s)", from, !member ? L"not in our lobby" : !packet ? L"not a voice packet" : L"no room for another talker");
             } else if (t->seqSeen && !VoiceSeqNewer(seq, t->lastSeq)) {
@@ -274,6 +279,7 @@ void VoiceChat::Play(VoiceTalker& t, const uint8_t* data, uint32_t len) {
         if (m_logged++ < 12) Log(false, L"voice: DecompressVoice answered %d for %u bytes from %llu", (int)r, len, t.id);
         return;
     }
+    if (written > kVoiceRingBytes) written = kVoiceRingBytes;  // (never more than the scratch and a ring slot hold, whatever Steam says)
     int slot = t.slots.Take(st.BuffersQueued);
     if (slot < 0) return;
     uint8_t* dst = t.ring + (size_t)slot * kVoiceRingBytes;

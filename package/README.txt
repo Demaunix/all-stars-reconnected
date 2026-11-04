@@ -20,11 +20,11 @@ REQUIREMENTS
   without them can join too. A join with a different mod set is refused with a
   message naming the difference; SteamMultiplayer.log in this mod's folder lists
   every difference.
-- Metal Sonic: the standalone Metal Sonic (1.1.2 or newer, including 1.1.4) and the
+- Metal Sonic: the standalone Metal Sonic (1.1.2 or newer, including 1.1.5) and the
   Roster Pack's Metal Sonic both work online, but not with each other (their racer
   lists differ). The Roster Pack's Metal Sonic needs the All-Stars Roster Pack,
   which every player needs too, even when Metal is OFF. The standalone Metal Sonic
-  1.1.0 Beta 3 isn't supported: update it to 1.1.4.
+  1.1.0 Beta 3 isn't supported: update it to 1.1.5.
 
 
 INSTALL
@@ -37,10 +37,11 @@ INSTALL
 3. Copy the "Steam Multiplayer" folder from this zip into the game's "mods" folder,
    so you get: <game folder>\mods\Steam Multiplayer\mod.ini
 4. Start the game from Steam.
-The A key's picture (INVITE FRIENDS, VIEW PROFILE) and the lobby's VIEW STEAM
-PROFILE wording come with this mod (it also carries a version of those menu files
-made for Metal Sonic's). If a later Metal Sonic changes them again, Metal Sonic's
-own version is used and only that picture or wording is missing.
+The A key's picture (INVITE FRIENDS, VIEW PROFILE), the controller pictures and the
+lobby's VIEW STEAM PROFILE wording come with this mod (it also carries a version of
+those menu and results-screen files made for Metal Sonic's). If a later Metal Sonic
+changes them again, Metal Sonic's own version is used and only those pictures or
+that wording are missing.
 
 UNINSTALL
 Delete the folder <game folder>\mods\Steam Multiplayer\, and <game folder>\mods-updates\
@@ -95,10 +96,14 @@ HOW TO PLAY
   (VIEW PROFILE) shows their Steam profile.
 - If Steam loses its connection, the lobby ends with "The connection to Steam has
   been lost." and online games can't be found or hosted until Steam is back.
-- Controllers: the menus show the keyboard's keys; on an Xbox-style pad A = Enter
-  (START RACE, select), B = Esc (BACK), X = F1 (CHANGE RACER, a player's menu),
-  Y = F2 (SETTINGS), the D-pad = the arrow keys. INVITE FRIENDS and push-to-talk
-  are keyboard-only for now (see KNOWN ISSUES).
+- Controllers: the online menus (lobby, game list, online results and pause) show
+  your controller's own buttons, with the consoles' pictures: Xbox buttons, or
+  PlayStation buttons for a PlayStation controller (through Steam Input). A (Cross)
+  = Enter (START RACE, select), B (Circle) = Esc (BACK), X (Square) = F1 (CHANGE
+  RACER, a player's menu), Y (Triangle) = F2 (SETTINGS), the D-pad = the arrow keys,
+  Back / View (Share / Create) = the A key (INVITE FRIENDS, VIEW PROFILE). The
+  pictures follow the device that pressed Start at the title screen; see [Menus]
+  PadPictures below. Push-to-talk is keyboard-only for now (see KNOWN ISSUES).
 - During the race, the karts near you carry name tags: the other players' names, and
   each computer racer's racer name.
 - Finish times are real time on every PC: when a game stutters, its race clock catches
@@ -120,7 +125,10 @@ SETTINGS (config.ini in this folder; read when the game starts)
 - [Menus] InviteKey=A: INVITE FRIENDS in the lobby and VIEW PROFILE on the game list
   (the consoles' triangle / Y button; same key names as the voice chat's Key). Its
   footer picture is always the A cap; another key still works, but the footer
-  shows the A cap.
+  shows the A cap. On a controller it is the Back / View button.
+- [Menus] PadPictures=auto: the online menus' button pictures for controller
+  players: auto (Xbox, or PlayStation for a PlayStation controller), xbox,
+  playstation, or keys (always the keyboard's keys).
 - [Race] HostRunsAI=1: as host, your game drives the computer racers for everyone.
 - [Race] ItemSync=1: as host, everyone's items and All-Star moves show on every
   screen, and so do the drivers' reactions (taunts, celebrations).
@@ -165,8 +173,13 @@ KNOWN ISSUES
   xaudio2_9.dll hear nothing (the log says so), their own voice still goes out.
   Voice is played the moment it arrives, so on a poor connection it can sound
   choppy.
-- INVITE FRIENDS and push-to-talk have no controller button yet: invite through
-  the Steam overlay (Shift+Tab), or set [Voice] Mode=open to talk without a key.
+- Push-to-talk has no controller button yet: set [Voice] Mode=open to talk without
+  a key.
+- The controller pictures are the consoles' (Xbox 360 and PlayStation 3 era): a
+  newer controller's View / Share / Create button looks different from its
+  picture, and Switch controllers show Xbox buttons. A PlayStation controller needs Steam Input in this game; with
+  another tool (e.g. DS4Windows) it shows Xbox buttons unless [Menus]
+  PadPictures=playstation.
 - Tested with up to 4 players over the internet. Lobbies of 5 to 8 players have
   not been tested yet.
 

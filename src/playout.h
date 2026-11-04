@@ -175,7 +175,11 @@ private:
         double span = (double)(int32_t)(b.tick - a.tick);
         float k = (float)(over / span);
         out = b.p;
-        for (int i = 0; i < 3; ++i) out.pos[i] = b.p.pos[i] + (b.p.pos[i] - a.p.pos[i]) * k;
+        for (int i = 0; i < 3; ++i) {
+            out.pos[i] = b.p.pos[i] + (b.p.pos[i] - a.p.pos[i]) * k;
+            if (out.pos[i] > 1e5f) out.pos[i] = 1e5f;  // (the pose check's range: two far-apart poses can't throw the car further)
+            if (out.pos[i] < -1e5f) out.pos[i] = -1e5f;
+        }
     }
 
     static void Blend(const PlayoutPose& a, const PlayoutPose& b, float t, PlayoutPose& out) {

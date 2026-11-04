@@ -26,15 +26,17 @@
 #include "lobby.h"
 #include "natives.h"
 #include "race_wire.h"
+#include "net_budget.h"
 #include "voice_chat.h"
 #include "search_rows.h"
 #include "race.h"
 #include "fingerprint.h"
 #include "update.h"
 #include "figure_presence.h"
+#include "pad_glyphs.h"
 
 #define MOD_NAME L"Steam Multiplayer"
-#define MOD_VERSION "1.1.1"
+#define MOD_VERSION "1.2.0"
 static const uint32_t kAppId = 34190;
 // sdk/redistributable_bin/steam_api.dll from Steamworks SDK 1.65 (32-bit).
 static const char kSteamApiSha256[] = "1cb8b7cb77923762d4e49b27e44295369a79e93b5d4282c5e840b268d28fe771";
@@ -353,10 +355,12 @@ static int TakeRaceOut(RaceNetMsg* out, int max) {
 static void PutRaceIn(uint64_t from, const void* data, uint32_t size, bool reliable) {
     EnterCriticalSection(&g_raceLock);
     const int cap = (int)(sizeof(g_raceIn) / sizeof(g_raceIn[0]));
-    if (g_raceInCount == cap) {  // full: drop the oldest unreliable message, else the oldest
-        int drop = 0;
-        for (int i = 0; i < cap; ++i)
-            if (!g_raceIn[i].reliable) { drop = i; break; }
+    if (g_raceInCount == cap) {  // full: the sender with the most queued loses its oldest (unreliable first; notes\SAFETY.md F2)
+        int drop = NetEvictIndex(g_raceIn, g_raceInCount, from);
+        if (drop < 0) {
+            LeaveCriticalSection(&g_raceLock);
+            return;
+        }
         memmove(g_raceIn + drop, g_raceIn + drop + 1, (cap - drop - 1) * sizeof(RaceNetMsg));
         --g_raceInCount;
     }
@@ -576,12 +580,18 @@ public:
                 }
             }
         }
+        // (at most 1024 a pump: a flood can't keep the worker from sending this game's own messages; the rest wait for the next)
         SteamNetworkingMessage_t* in[32];
-        while ((n = SteamNetworkingMessages()->ReceiveMessagesOnChannel(kRaceChannel, in, 32)) > 0) {
+        int taken = 0;
+        while (taken < 1024 && (n = SteamNetworkingMessages()->ReceiveMessagesOnChannel(kRaceChannel, in, 32)) > 0) {
+            taken += n;
             for (int i = 0; i < n; ++i) {
                 uint64_t from = in[i]->m_identityPeer.GetSteamID64();
                 uint32_t size = (uint32_t)in[i]->m_cbSize;
-                if (IsMember(from) && size > 0 && size <= kRaceMsgMax) {
+                bool firstDrop = false;
+                if (IsMember(from) && size > 0 && size <= kRaceMsgMax && !m_raceBudget.Take(from, GetTickCount(), &firstDrop)) {
+                    if (firstDrop && m_floodLogged++ < 10) Log(true, L"race messages from %llu dropped: more than %.0f a second", from, kNetRatePerSecond);
+                } else if (IsMember(from) && size > 0 && size <= kRaceMsgMax) {
                     PutRaceIn(from, in[i]->m_pData, size, (in[i]->m_nFlags & k_nSteamNetworkingSend_Reliable) != 0);
                     NotePeer(from);
                 } else if (!m_strangerLogged) {
@@ -1251,8 +1261,8 @@ private:
         char v[96];
         if (m_progress[0] < 0) v[0] = 0;
         else sprintf_s(v, "%d,%d,%d,%d,%u,%d", m_progress[0], m_progress[1], m_progress[2], m_progress[3], (uint32_t)m_progress[4], m_progress[5] ? 1 : 0);
-        if (strcmp(SteamMatchmaking()->GetLobbyMemberData(m_lobby, SteamUser()->GetSteamID(), "pos"), v) != 0)
-            SteamMatchmaking()->SetLobbyMemberData(m_lobby, "pos", v);
+        const char* posted = SteamMatchmaking()->GetLobbyMemberData(m_lobby, SteamUser()->GetSteamID(), "pos");
+        if (posted && strcmp(posted, v) != 0) SteamMatchmaking()->SetLobbyMemberData(m_lobby, "pos", v);
         if (m_isHost) WriteRacing();
         WritePresence();
     }
@@ -1329,6 +1339,19 @@ private:
     // Re-reads every member's racer/ready and the host's rules (no Steam requests, no logging).
     void ReadLobbyData() {
         ISteamMatchmaking* mm = SteamMatchmaking();
+        // KICK, enforced by every game (notes\SAFETY.md F3): a member on the owner's "banned" list (only the owner can write lobby
+        // data) is left out here, from the bars, the host's Start and the race and voice messages, even if its game ignores the
+        // kick and stays in the Steam lobby.
+        const char* banned = mm->GetLobbyData(m_lobby, "banned");
+        size_t before = m_members.size();
+        m_members.erase(std::remove_if(m_members.begin(), m_members.end(), [&](const LobbyMember& m) {
+                            return !m.isHost && !m.isMe && !IsTestPlayer(m.id) && IdListHas(banned, m.id);
+                        }),
+                        m_members.end());
+        if (m_members.size() != before && !m_bannedLogged) {
+            m_bannedLogged = true;
+            Log(true, L"a kicked player is still in the Steam lobby: this game leaves them out");
+        }
         for (LobbyMember& m : m_members) {
             if (IsTestPlayer(m.id)) continue;  // (SyncTestPlayers below)
             m.racer = DataInt(mm->GetLobbyMemberData(m_lobby, CSteamID(m.id), "racer"), -1);
@@ -1336,7 +1359,8 @@ private:
             m.net = m.isMe ? m_netReady : DataInt(mm->GetLobbyMemberData(m_lobby, CSteamID(m.id), "net"), 0) == 1;
             ReadProgress(mm->GetLobbyMemberData(m_lobby, CSteamID(m.id), "pos"), m);
             const char* inp = mm->GetLobbyMemberData(m_lobby, CSteamID(m.id), "inp");
-            m.input = m.isMe ? m_postedInput : !strcmp(inp, "k") ? kInputKeyboard : !strcmp(inp, "c") ? kInputController : kInputUnknown;
+            // (Null once Steam has dropped that member, e.g. a host quitting while this game is on the results.)
+            m.input = m.isMe ? m_postedInput : !inp ? kInputUnknown : !strcmp(inp, "k") ? kInputKeyboard : !strcmp(inp, "c") ? kInputController : kInputUnknown;
         }
         int v[kRuleCount];
         char tail = 0;
@@ -1789,6 +1813,9 @@ private:
     LobbyRules m_rules = kNoRules;                // the current lobby's rules, as Steam has them
     std::vector<uint64_t> m_peers;                // games we exchanged race messages with
     bool m_strangerLogged = false;
+    NetBudget m_raceBudget;  // each member's race messages a second (net_budget.h; notes\SAFETY.md F2)
+    int m_floodLogged = 0;
+    bool m_bannedLogged = false;
     CCallResult<Session, LobbyCreated_t> m_created;
     CCallResult<Session, LobbyEnter_t> m_entered;
     CCallResult<Session, LobbyMatchList_t> m_listed;
@@ -1855,8 +1882,10 @@ static DWORD WINAPI Worker(void*) {
             session.PumpVoice();
             session.Tick();
             session.Publish();  // every state change reaches the menus, even one a path forgot to publish
+            PadGlyphsSteamPoll();  // (once a second: which controller Steam Input presents behind each XInput slot)
         }
         SetSteamUp(false);
+        PadGlyphsSteamStop();
         session.Stop();
         // Let an outstanding create/join finish so its lobby is left rather than abandoned.
         for (int i = 0; i < 40 && session.Busy(); ++i) {
@@ -1897,6 +1926,11 @@ extern "C" HRESULT __cdecl SsasrModInitialize(const SsasrHostApiV1* api, const w
     BackgroundInstall(api->game_image, dir);
     // Our menu scripts call the group-0x7A natives, so they are only substituted when those exist.
     if (NativesInstall(api->game_image)) {
+        // (here, not after the Steam checks below: without Steam the menus must not offer the pack's list either)
+        if (ModInstalled(dir.substr(0, dir.find_last_of(L"\\")), kLocalRacerPack)) {
+            ScriptSubstUseStockRacers();
+            Log(false, L"a racer pack is installed: its racers stay offline; online games use the stock racers, and it isn't part of the mod check");
+        }
         ScriptSubstInstall(api->game_image, dir);
         RaceConfigure((dir + L"\\config.ini").c_str());
         g_configIni = dir + L"\\config.ini";
@@ -1943,7 +1977,7 @@ extern "C" HRESULT __cdecl SsasrModInitialize(const SsasrHostApiV1* api, const w
     std::wstring modsDir = dir.substr(0, dir.find_last_of(L"\\"));
     std::wstring badMod;
     g_modsOk = ScanMods(modsDir, g_mods, badMod);
-    g_modsEncoded = EncodeMods(g_mods);
+    g_modsEncoded = EncodeMods(RequiredMods(g_mods, {}));  // (the longest list a lobby of this game can publish)
     if (g_modsOk) RaceUseEggHangar(std::any_of(g_mods.begin(), g_mods.end(), [](const ModEntry& m) { return m.id == "egg-hangar"; }));
     if (!g_modsOk) Log(true, L"could not read the mod list (%s); online games will refuse to start or join", badMod.empty() ? L"mods folder" : badMod.c_str());
     else if (g_modsEncoded.size() >= k_cubChatMetadataMax) { g_modsOk = false; Log(true, L"too many mods to publish in a Steam lobby (%u bytes)", (unsigned)g_modsEncoded.size()); }

@@ -93,11 +93,31 @@ inline bool DecodeMods(const std::string& s, std::vector<ModEntry>& out) {
 // needn't have it. Every other mod stays exact-match.
 inline bool ModToggleable(const std::string& id) { return id == "egg-hangar" || id == "metal-sonic"; }
 
-// The lobby's required set (lobby data "mods"): every mod but the toggleable ones named in `off`.
+// 1.2: a racer pack that stays local: its racers are never offered online (the game uses the stock list, ScriptSubstUseStockRacers),
+// so it never joins a lobby's list, and a game with it may join anyone and be joined by anyone.
+const char kLocalRacerPack[] = "five-racers";
+inline bool ModLocalOnly(const std::string& id) { return id == kLocalRacerPack; }
+
+// Whether a mods\<folder>\mod.ini has this id; unlike ScanMods it needs nothing else from the folder, or from the other mods.
+inline bool ModInstalled(const std::wstring& modsDir, const char* id) {
+    WIN32_FIND_DATAW d;
+    HANDLE f = FindFirstFileW((modsDir + L"\\*").c_str(), &d);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    bool found = false;
+    do {
+        std::wstring name = d.cFileName;
+        if (name != L"." && name != L".." && (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+            found = ModIniField(modsDir + L"\\" + name + L"\\mod.ini", L"id") == id;
+    } while (!found && FindNextFileW(f, &d));
+    FindClose(f);
+    return found;
+}
+
+// The lobby's required set (lobby data "mods"): every mod but the local ones and the toggleable ones named in `off`.
 inline std::vector<ModEntry> RequiredMods(const std::vector<ModEntry>& mods, const std::vector<std::string>& off) {
     std::vector<ModEntry> out;
     for (const ModEntry& m : mods)
-        if (!ModToggleable(m.id) || std::find(off.begin(), off.end(), m.id) == off.end()) out.push_back(m);
+        if (!ModLocalOnly(m.id) && (!ModToggleable(m.id) || std::find(off.begin(), off.end(), m.id) == off.end())) out.push_back(m);
     return out;
 }
 
@@ -125,7 +145,7 @@ inline std::vector<std::string> DescribeModDifferences(const std::vector<ModEntr
         else if (!(*it == h)) out.push_back("different files: " + h.id + " " + h.version + " (same version, different build)");
     }
     for (const ModEntry& m : mine)
-        if (!ModToggleable(m.id) && std::none_of(host.begin(), host.end(), [&](const ModEntry& h) { return h.id == m.id; }))
+        if (!ModToggleable(m.id) && !ModLocalOnly(m.id) && std::none_of(host.begin(), host.end(), [&](const ModEntry& h) { return h.id == m.id; }))
             out.push_back("extra: " + m.id + " " + m.version + " (the host does not have it)");
     return out;
 }

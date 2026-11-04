@@ -30,8 +30,8 @@ MODS = Path(os.environ["ASR_MODS"]) if os.environ.get("ASR_MODS") else xpac.GAME
 METAL = MODS / "Metal Sonic (Roster Pack)"  # or the folder given as the 4th argument (a Metal Sonic package, e.g. 1.1.3 or 1.1.4)
 # The members Metal Sonic changes too, each with our variant: 7 navigator scenes (key pictures), 7 lobby scenes (M8: the yellow
 # bar, 1.0.0: Egg Hangar's card), 5 dialogs text tables (VIEW STEAM PROFILE, UNMUTE) and 7 Settings popup scenes (1.0.0: Egg
-# Hangar's name).
-SHARED = 26
+# Hangar's name); 1.2: the 14 race results scenes (the controller pictures of the online results and pause buttons).
+SHARED = 40
 OURS = ROOT / "out" / "Steam Multiplayer"
 DESKTOP = "SteamMultiplayerLoaderCombo"
 failures: list[str] = []

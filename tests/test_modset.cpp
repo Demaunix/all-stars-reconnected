@@ -80,6 +80,33 @@ int main(int argc, char** argv) {
     CHECK(DescribeModDifferences(joiner, req).size() == 1);
     CHECK(RequiredMods(hostAll, {}).size() == hostAll.size());  // nothing off = the 1.0.0 list
 
+    // Found by its id alone, also when another mod's mod.ini would stop ScanMods first (the folder sorts before it).
+    std::wstring modsLocal = root + L"\\mods-local";
+    CreateDirectoryW(modsLocal.c_str(), nullptr);
+    WriteIni(modsLocal + L"\\A Broken", "[mod]\r\nid=broken\r\n");
+    CreateDirectoryW((modsLocal + L"\\B Not A Mod").c_str(), nullptr);
+    WriteIni(modsLocal + L"\\C Pack", "[mod]\r\nid=" + std::string(kLocalRacerPack) + "\r\n");
+    CHECK(ModInstalled(modsLocal, kLocalRacerPack));
+    CHECK(!ModInstalled(modsLocal, "metal-sonic"));
+    CHECK(!ModInstalled(root + L"\\no-such-folder", kLocalRacerPack));
+
+    // A racer pack that stays local: never in a lobby's list, never a difference, in either direction.
+    std::vector<ModEntry> hostLocal = mine;
+    hostLocal.push_back({kLocalRacerPack, "1.0.3", H1, H1});
+    std::vector<ModEntry> reqLocal = RequiredMods(hostLocal, {});
+    CHECK(!ModListed(reqLocal, kLocalRacerPack) && reqLocal.size() == mine.size());
+    CHECK(DescribeModDifferences(mine, reqLocal).empty());       // a host with it, a joiner without
+    CHECK(DescribeModDifferences(hostLocal, RequiredMods(mine, {})).empty());  // a joiner with it, a host without
+    CHECK(DescribeModDifferences(hostLocal, reqLocal).empty());  // both, even at different versions
+    hostLocal.back().version = "1.0.4";
+    CHECK(DescribeModDifferences(hostLocal, reqLocal).empty());
+    CHECK(!ModsDifferBeyondIcons(hostLocal, RequiredMods(mine, {})));
+    CHECK(RefusedMods(hostLocal, RequiredMods(mine, {})) == 0);
+    std::vector<ModEntry> withMetal = RequiredMods(mine, {});     // a host's lobby with Metal Sonic on: the pack doesn't stand in for it
+    withMetal.push_back({"metal-sonic", "1.1.5", H2, H1});
+    CHECK(DescribeModDifferences(hostLocal, withMetal).size() == 1);
+    CHECK(ModStateFor(hostLocal, withMetal, "metal-sonic") == kModMissing);
+
     // The game list's mod icons: each used toggleable mod's state here; "(other mods)" only for the other mods.
     std::vector<ModEntry> mineIcons = mine;
     mineIcons.push_back({"egg-hangar", "1.2.0", H1, H2});  // the host's build

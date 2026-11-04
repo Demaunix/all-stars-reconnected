@@ -33,6 +33,7 @@ import lobby_drift_row  # noqa: E402
 import egg_lobby  # noqa: E402
 import lobby_bars  # noqa: E402
 import mod_icons  # noqa: E402
+import pad_glyphs  # noqa: E402
 import steam_tiles as st  # noqa: E402
 import text_tables  # noqa: E402
 from scene_container import packer_for, sections6  # noqa: E402
@@ -289,7 +290,8 @@ def exact_alpha(ptex: bytearray, page: tuple, painted: np.ndarray, blocks: list)
 # ---------------------------------------------------------------- all scenes, every base
 # The tools whose change rebuilds the scenes (tools/package.py checks the same list).
 INPUTS = ("steam_tiles.py", "text_tables.py", "dialog_icons.py", "scene_container.py", "lobby_bars.py", "egg_lobby.py", "mod_icons.py", "lobby_drift_row.py", "codexui/build_ui.py",
-          "codexui/decode_ui_texture.py", "codexui/probe.py")
+          "codexui/decode_ui_texture.py", "codexui/probe.py", "pad_glyphs.py")
+CELLS = ("reference/pad-glyphs/cells.json", "reference/pad-glyphs/cells.bin")  # the controller pictures (tools\pad_glyphs.py)
 METAL_PORTRAIT_SCENE = "metal-sonic-1.1.0-beta.3/E01CF5DC.dat"  # (under BASES) Metal Sonic's racer portrait for the game list's mod icons
 
 
@@ -297,12 +299,13 @@ def build(root: Path) -> dict:
     """Writes build/keys/<base>/<KEY>.dat (+ previews) and build/keys/keys.json; returns the json. Beside the 7 navigator scenes,
     each base gets the text tables of tools\\text_tables.py (the lobby popup's VIEW STEAM PROFILE, UNMUTE) and the 7 lobby scenes
     with the yellow bar of tools\\lobby_bars.py (M8): replaced members Metal Sonic replaces too, so each carries a variant made on
-    Metal's version, for the same reason."""
+    Metal's version, for the same reason. 1.2: the navigator scenes and the 14 race results scenes also get the controller pictures
+    (tools\\pad_glyphs.py)."""
     out = root / "build" / "keys"
     out.mkdir(parents=True, exist_ok=True)
     path = st.GAME / st.ARCHIVE
     _, rows = st.read_rows(path)
-    members = list(SCENES) + list(lobby_bars.SCENES) + list(text_tables.EDITS) + list(egg_lobby.POPUP_SCENES)
+    members = list(SCENES) + list(lobby_bars.SCENES) + list(text_tables.EDITS) + list(egg_lobby.POPUP_SCENES) + list(pad_glyphs.RESULTS)
     bases = {"stock": {key: st.member(path, rows, key) for key in members}}
     for folder in sorted((root / BASES).glob("*")) if (root / BASES).exists() else []:
         files = {key: folder / ("%08X.dat" % key) for key in members}
@@ -312,6 +315,7 @@ def build(root: Path) -> dict:
             print(f"{folder.name}: skipped, not all of {[('%08X' % k) for k in members]} are there")
     tools = Path(__file__).resolve().parent
     inputs = {name: sha((tools / name).read_bytes()) for name in INPUTS}
+    inputs.update({name: sha((root / name).read_bytes()) for name in CELLS})
     for base, entries in bases.items():
         for key, entry in entries.items():
             inputs[f"{base}/{key:08X}"] = sha(entry)
@@ -326,7 +330,10 @@ def build(root: Path) -> dict:
             if key in SCENES:
                 name = f"{base}/{SCENES[key]}"
                 payload, facts = build_scene(entry, name, folder / ("%08X-row.png" % key))
-                op_name = f"navigator_info scene ({SCENES[key]}): the {NEW_LABEL} key picture (INVITE FRIENDS / VIEW PROFILE)"
+                payload = pad_glyphs.add(payload, "nav", SCENES[key])
+                facts["pad_sets"] = "F010-F017 Xbox, F018-F01F PlayStation, F020-F027 the keys"
+                op_name = (f"navigator_info scene ({SCENES[key]}): the {NEW_LABEL} key picture (INVITE FRIENDS / VIEW PROFILE) and the "
+                           "controller pictures")
                 print(f"{name}: {facts['glyphs']} glyphs, {facts['blocks']} blocks re-encoded (error {facts['reencode_error']}), cells {facts['cells']}")
             elif key in lobby_bars.SCENES:
                 name = f"{base}/lobby {lobby_bars.SCENES[key]}"
@@ -345,6 +352,12 @@ def build(root: Path) -> dict:
                 facts = {"text": "%08X" % egg_lobby.NAME}
                 op_name = f"lobby Settings popup scene ({lang}): Egg Hangar's course name"
                 print(f"{base}/popups {lang}: Egg Hangar's name ({len(entry)} -> {len(payload)} stored bytes)")
+            elif key in pad_glyphs.RESULTS:
+                kind, lang = pad_glyphs.RESULTS[key]
+                payload = pad_glyphs.add(entry, kind, lang)
+                facts = {"pad_sets": "F010-F016 Xbox, F018-F01E PlayStation, F020-F026 the keys", "fonts": ["%08x" % f for f in pad_glyphs.PC_FONTS[kind]]}
+                op_name = f"race results scene ({'16:9' if kind == 'wide' else '4:3'} {lang}): the controller pictures of the online results and pause buttons"
+                print(f"{base}/results {kind} {lang}: controller pictures ({len(entry)} -> {len(payload)} stored bytes)")
             else:
                 payload = text_tables.patch_entry(entry, text_tables.EDITS[key])
                 # 1.1: the join refusal pop-up's mod badges (F001 / F002 in the dialog fonts; the tick from this base's English lobby scene)

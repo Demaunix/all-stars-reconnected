@@ -555,6 +555,9 @@ struct Peer {
     bool carHandled;   // gone: its car handed to an AI (CarLeft)
     uint8_t abortReason;  // gone through an Abort message: its reason (0: gone from the lobby, no message)
     bool test;        // a test player (lobby.h): no game behind it; the host's game drives its car and casts its votes
+    DWORD goSent[3];  // host: when a Go for each hold stage last went back to it (a flood of Loaded gets one per 2 s)
+    int refused;      // its messages refused as implausible (logged up to 5)
+    uint32_t finishedAt;  // this game's race clock (ticks) when its Finished arrived (the log compares the two times)
 };
 
 // A car this game shows from the network: another player's, or (guest) one of the host's AI.
@@ -830,7 +833,12 @@ bool CourseUsable(int course) {
            (kCourses[course].hash != kEggCourseHash || (g_eggHangar && g_eggLobby));
 }
 int g_racerCount = 0;
-bool RacerOn(int i) { return g_racerList && i >= 0 && i < g_racerCount && (g_metalLobby || strcmp(g_racerList[i].name, "mechasonic") != 0); }
+// (The stock list's last row: a stock game never offers it, but a racer pack that stays offline turns it on in the menus.)
+const uint32_t kStockHiddenRacerHash = 0x04f8af71;
+bool RacerOn(int i) {
+    return g_racerList && i >= 0 && i < g_racerCount && (g_metalLobby || strcmp(g_racerList[i].name, "mechasonic") != 0) &&
+           (g_racerList != kRacersStock || g_racerList[i].hash != kStockHiddenRacerHash);
+}
 
 const wchar_t* PhaseName(Phase p) {
     static const wchar_t* names[] = {L"idle", L"armed", L"creating", L"created", L"set up", L"hold A", L"intros", L"hold B", L"running", L"failed"};
@@ -886,6 +894,7 @@ void RestoreRules(const wchar_t* when) {
 
 bool RaceOver();
 double StepMs();
+void TimeText(uint32_t t, wchar_t* out, size_t n);
 
 // Guest: the AI that followed the host's game drive themselves again (the host left, or the race goes
 // on offline): the AI state for the race (or the grid before GO), as the console's message 6 did.
@@ -1186,25 +1195,67 @@ void PlayReactions();
 void LogItems();
 void LogVoices();
 
+// A refused contract is logged (and answered) at most 5 times a minute: any lobby member can send them, and each log line
+// opens the log file on the game thread, so a flood would make the game stutter (notes\SAFETY.md F1). The lobby owner's
+// refusals count apart (`fromHost`), so another member's flood can't keep this game from answering the host's mismatch.
+bool ContractRefusalLogged(bool fromHost = true) {
+    static DWORD since[2] = {};
+    static int count[2] = {};
+    int k = fromHost ? 1 : 0;
+    DWORD now = GetTickCount();
+    if (now - since[k] > 60000) {
+        since[k] = now;
+        count[k] = 0;
+    }
+    return count[k]++ < 5;
+}
+
+// A player's own finish (Finished) is believed only when it could be true (notes\SAFETY.md F4): while this race runs, with a
+// reason the results use (1 finished, 2-3, 6 estimated; never 4/5) and a time of at least kMinLapMs a lap. A forged early finish
+// would start RACE ENDS IN for everyone. ApplyFinishes then waits, before taking it, until this race has run that long too (by
+// the race clock after its catch-up: right after a long stall the clock is still behind when the messages are read).
+const uint32_t kMinLapMs = 10000, kFinishAheadMs = 5000;
+double RaceClockMs() { return (double)*(volatile uint32_t*)(uintptr_t)kRaceClock * StepMs(); }
+double FinishMs(const RaceFinish& f) { return (double)f.time / 4096.0 * StepMs(); }
+double LeastRaceMs() { return (double)g.c.laps * kMinLapMs; }
+bool FinishPlausible(const RaceFinish& f) {
+    if (g.phase != kRunning || !(f.reason == 1 || f.reason == 2 || f.reason == 3 || f.reason == 6)) return false;
+    return FinishMs(f) >= LeastRaceMs();
+}
+
 void HandleMessage(const RaceNetMsg& m, uint64_t lobbyHost) {
     WireType type;
     uint32_t race;
     if (!WirePeek(m.data, m.size, type, race)) return;
     if (type == kMsgContract) {
         RaceContract c;
-        if (m.peer != lobbyHost) { Log(false, L"race contract from %llu ignored (not the lobby host)", m.peer); return; }
-        if (!DecodeContract(m.data, m.size, c)) { Log(true, L"race contract from the host could not be read"); return; }
-        if (g.phase != kIdle && g.phase != kFailed) { Log(false, L"race contract %08x ignored: race %08x is in progress", c.race, g.c.race); return; }
+        if (m.peer != lobbyHost) {
+            if (ContractRefusalLogged(false)) Log(false, L"race contract from %llu ignored (not the lobby host)", m.peer);
+            return;
+        }
+        if (!DecodeContract(m.data, m.size, c)) {
+            if (ContractRefusalLogged()) Log(true, L"race contract from the host could not be read");
+            return;
+        }
+        if (g.phase != kIdle && g.phase != kFailed) {
+            if (ContractRefusalLogged()) Log(false, L"race contract %08x ignored: race %08x is in progress", c.race, g.c.race);
+            return;
+        }
         bool mine = false;
         for (int i = 0; i < c.humanCount; ++i) mine |= c.humans[i] == RaceNetSelf();
-        if (!mine) { Log(false, L"race contract %08x does not include this player; ignored", c.race); return; }
+        if (!mine) {
+            if (ContractRefusalLogged()) Log(false, L"race contract %08x does not include this player; ignored", c.race);
+            return;
+        }
         uint8_t b[kWireMax];
         if (!CourseUsable(c.course) || kCourses[c.course].hash != c.courseHash) {
+            if (!ContractRefusalLogged()) return;
             Log(true, L"race contract %08x names a course this game doesn't know", c.race);
             RaceNetSend(m.peer, b, EncodeAbort(c.race, kAbortMismatch, b, sizeof(b)), true);  // the host needn't wait
             return;
         }
         if (!RosterKnown(c)) {  // an unknown character would be created with no character data (crash later)
+            if (!ContractRefusalLogged()) return;
             Log(true, L"race contract %08x names a racer this game can't use here", c.race);
             RaceNetSend(m.peer, b, EncodeAbort(c.race, kAbortMismatch, b, sizeof(b)), true);
             return;
@@ -1224,17 +1275,19 @@ void HandleMessage(const RaceNetMsg& m, uint64_t lobbyHost) {
             p->reached = stage;
             Log(false, L"race: %llu reached hold %u", m.peer, stage);
         }
-        if (g.host && stage <= g.released) {  // released before this player got there (timeout, lost Go)
+        // Released before this player got there (timeout, lost Go): the Go again, at most every 2 s (a flood of Loaded would fill
+        // the outgoing queue the host's cars need; notes\SAFETY.md F2).
+        if (g.host && stage <= g.released && (!p->goSent[stage] || (int32_t)(GetTickCount() - p->goSent[stage]) >= 2000)) {  // (signed: the stamp is | 1)
             uint8_t b[kWireMax];
             size_t n = EncodeGo(g.c.race, stage, b, sizeof(b));
-            if (n) RaceNetSend(m.peer, b, n, true);
+            if (n && RaceNetSend(m.peer, b, n, true)) p->goSent[stage] = GetTickCount() | 1;
         }
         break;
     }
-    case kMsgGo: {
+    case kMsgGo: {  // (from the race's host only: after a host leaves, Steam makes another member the lobby's owner)
         uint32_t r;
         uint8_t stage;
-        if (m.peer == lobbyHost && DecodeGo(m.data, m.size, r, stage) && stage > g.released) {
+        if (p->index == 0 && !p->gone && DecodeGo(m.data, m.size, r, stage) && stage > g.released) {
             g.released = stage;
             Log(false, L"race: the host released hold %u", stage);
         }
@@ -1247,14 +1300,14 @@ void HandleMessage(const RaceNetMsg& m, uint64_t lobbyHost) {
     }
     case kMsgCars: {  // the host's cars: its player, and the AI when the host drives them
         RaceCars cars;
-        if (m.peer != lobbyHost || g.host || !DecodeCars(m.data, m.size, cars)) break;
+        if (p->index != 0 || p->gone || g.host || !DecodeCars(m.data, m.size, cars)) break;
         ++g.carsIn;
         for (int i = 0; i < cars.count; ++i)
             if (HostCar(cars.cars[i].slot) && cars.cars[i].slot != g.local) PushPose(cars.cars[i]);
         break;
     }
     case kMsgResults: {
-        if (m.peer != lobbyHost || g.host || !HostAi() || g.resultsIn) break;
+        if (p->index != 0 || p->gone || g.host || !HostAi() || g.resultsIn) break;
         if (DecodeResults(m.data, m.size, g.results)) {
             g.resultsIn = true;
             Log(false, L"race: the host's results arrived");
@@ -1312,10 +1365,16 @@ void HandleMessage(const RaceNetMsg& m, uint64_t lobbyHost) {
     }
     case kMsgFinished: {
         RaceFinish f;
-        if (DecodeFinished(m.data, m.size, f) && f.slot == p->index && !p->finished) {
-            p->finished = true;  // applied to its lap record by the next race update (ApplyFinishes)
-            p->fin = f;
+        if (!DecodeFinished(m.data, m.size, f) || f.slot != p->index || p->finished) break;
+        if (!FinishPlausible(f)) {
+            wchar_t t[24];
+            TimeText(f.time, t, 24);
+            if (p->refused++ < 5) Log(true, L"race: player %d's finish (%s, reason %u) refused: not possible at this point of the race", p->index, t, f.reason);
+            break;
         }
+        p->finished = true;  // applied to its lap record by the next race update (ApplyFinishes)
+        p->fin = f;
+        p->finishedAt = *(volatile uint32_t*)(uintptr_t)kRaceClock;
         break;
     }
     case kMsgAbort: {
@@ -1627,9 +1686,22 @@ void ApplyFinishes() {
         wchar_t t[24];
         TimeText(p.fin.time, t, 24);
         if (RaceOver()) { Log(false, L"race: player %d finished in %s after this game's race had ended (not used)", p.index, t); continue; }
+        if (RaceClockMs() + kFinishAheadMs < LeastRaceMs()) {  // this race hasn't run long enough for anyone to finish: later
+            p.applied = false;
+            continue;
+        }
+        if (p.fin.reason == 1 && FinishMs(p.fin) > RaceClockMs() + kFinishAheadMs)  // (only noted: the others' GO may be earlier)
+            Log(false, L"race: player %d's crossing (%s) is later than this game's race clock now", p.index, t);
+        // For judging later how far a player's own time may differ from what the others saw (notes\SAFETY.md, cheat resistance):
+        // when the message arrived here, and the time this game's copy of the car crossed the line, if it already had.
+        wchar_t arrived[24], here[24] = L"-";
+        TimeText(p.finishedAt << 12, arrived, 24);
+        uint8_t* own = Record(RecordIndex(g.racers[p.index]));
+        if (own && FinishReason(RecordIndex(g.racers[p.index]))) TimeText(*(uint32_t*)(own + kRecTime), here, 24);
         bool seen = false;
         if (!SetResult(p.index, p.fin.reason, p.fin.time, p.fin.best, &seen)) { Log(true, L"race: player %d's lap record was not found; their finish isn't shown", p.index); continue; }
-        Log(false, L"race: player %d finished: %s (reason %u)%s", p.index, t, p.fin.reason, seen ? L"; this game had already seen the car finish" : L"");
+        Log(false, L"race: player %d finished: %s (reason %u); it arrived at %s of this race; this game's copy of the car crossed at %s", p.index, t,
+            p.fin.reason, arrived, here);
     }
 }
 
@@ -3204,6 +3276,10 @@ void QueueEvent(int i, const RaceEvent& e) {
     }
     if (!SenderOwns(p, e.slot) || (!PseudoEvent(e.kind) && e.body[0] != e.slot)) {
         if (g.evRefused++ < 5) Log(true, L"race: items: an event from player %d for car %d refused (not that player's car)", p.index, e.slot);
+        return;
+    }
+    if (!FireLaunchValid(e)) {  // (notes\SAFETY.md F6)
+        if (g.evRefused++ < 5) Log(true, L"race: items: a fire from player %d (item %08x) refused: its launch data can't be real", p.index, GadgetOf(e));
         return;
     }
     if (g.queueCount[i] == kEventQueueCap) {

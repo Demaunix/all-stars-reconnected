@@ -11,6 +11,7 @@
 #include "lobby.h"
 #include "log.h"
 #include "modset.h"  // RefusalText: the join refusal pop-up's body
+#include "pad_glyphs.h"
 #include "race.h"
 #include "race_tables.h"
 #include "voice.h"  // VoiceKeyOf: the key names of config.ini
@@ -551,8 +552,9 @@ static void Handle(Descriptor* d) {
         // Not while the Steam overlay is up (it draws inside the game's window, so the foreground check passes, and a typed "a"
         // in its friend search would ask for the invite dialog again); and a key held since before the last reading a while ago
         // (a popup, a dialog, a race in between) is a baseline, not a press.
+        // 1.2: on a controller, the Back / View button (the user's choice; no menu reads it: re\pad-glyphs\FINDINGS2.md Q1).
         DWORD now = GetTickCount();
-        bool down = !LobbyOverlayOpen() && KeyDown(InviteKey());
+        bool down = !LobbyOverlayOpen() && (KeyDown(InviteKey()) || PadGlyphsInviteHeld());
         bool pressed = down && !g_refreshDown && now - g_refreshReadAt < 250;
         g_refreshDown = down;
         g_refreshReadAt = now;
@@ -877,6 +879,7 @@ void NativesTestSetKeyState(bool (*fn)(int)) { g_keyState = fn; g_refreshDown = 
 // Same frame as the original thiscall (ECX = vm, two stack args, callee pops 8).
 static void __fastcall Dispatch(void* vm, void* /*edx*/, uint32_t id, void* desc) {
     if (!g_scriptThread) g_scriptThread = GetCurrentThreadId();  // the game's first native call
+    if (GetCurrentThreadId() == g_scriptThread) PadGlyphsFrame();  // (the controller pictures; it runs every few ms)
     if (((id >> 8) & 0xff) != kNatGroup) {
         NativeCall* d = (NativeCall*)desc;
         if (d && d->id == id && RaceNativeBefore(vm, d)) return;  // (the descriptor carries the same id)

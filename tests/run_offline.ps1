@@ -55,13 +55,36 @@ $fail += $LASTEXITCODE
 $fail += $LASTEXITCODE
 & (Join-Path $root 'build\test_script_subst.exe') other $packSbn
 $fail += $LASTEXITCODE
+# A racer pack that stays local (its package isn't part of this source: these run where it is there).
+$localSbn = Join-Path $root 'build\racer-pack\FrontEndScripts.sbn'
+if (Test-Path $localSbn) {
+    & (Join-Path $root 'build\test_script_subst.exe') local $localSbn
+    $fail += $LASTEXITCODE
+    & (Join-Path $root 'build\test_script_subst.exe') localother $localSbn
+    $fail += $LASTEXITCODE
+}
 cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O2 /MT /EHsc /DUNICODE /D_UNICODE /DNATIVES_TEST /I`"$root\src`" /I`"$root\build`" /Fo`"$root\build\\`" /Fe`"$root\build\test_natives.exe`" `"$root\tests\test_natives.cpp`" `"$root\src\natives.cpp`" user32.lib"
 if ($LASTEXITCODE) { throw 'natives test build failed' }
 & (Join-Path $root 'build\test_natives.exe')
 $fail += $LASTEXITCODE
+cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O2 /MT /EHsc /DUNICODE /D_UNICODE /DPADGLYPHS_TEST /I`"$root\src`" /Fo`"$root\build\\`" /Fe`"$root\build\test_pad_glyphs.exe`" `"$root\tests\test_pad_glyphs.cpp`" `"$root\src\pad_glyphs.cpp`""
+if ($LASTEXITCODE) { throw 'pad glyphs test build failed' }
+& (Join-Path $root 'build\test_pad_glyphs.exe')
+$fail += $LASTEXITCODE
 cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O2 /MT /EHsc /I`"$root\src`" /Fo`"$root\build\\`" /Fe`"$root\build\test_race_wire.exe`" `"$root\tests\test_race_wire.cpp`""
 if ($LASTEXITCODE) { throw 'race wire test build failed' }
 & (Join-Path $root 'build\test_race_wire.exe')
+$fail += $LASTEXITCODE
+# Every decoder of what other players and Steam lobbies send, fuzzed under the address sanitizer (notes\SAFETY.md; a long run:
+# build\fuzz\fuzz_decoders.exe <inputs> <seed>). Its own folder: the sanitizer's objects and runtime DLL stay apart.
+$fuzz = Join-Path $root 'build\fuzz'
+New-Item -ItemType Directory -Force $fuzz | Out-Null
+cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O1 /Zi /MT /EHsc /std:c++17 /fsanitize=address /I`"$root\src`" /I`"$root\third_party\steamworks\sdk\public`" /Fo`"$fuzz\\`" /Fd`"$fuzz\\`" /Fe`"$fuzz\fuzz_decoders.exe`" `"$root\tests\fuzz_decoders.cpp`""
+if ($LASTEXITCODE) { throw 'fuzz test build failed' }
+$asan = Get-ChildItem 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\*\bin\Hostx64\x86\clang_rt.asan_dynamic-i386.dll' | Select-Object -Last 1
+if (-not $asan) { throw 'the address sanitizer runtime (clang_rt.asan_dynamic-i386.dll) was not found' }
+Copy-Item $asan.FullName $fuzz -Force
+& (Join-Path $fuzz 'fuzz_decoders.exe') 300000 1
 $fail += $LASTEXITCODE
 cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O2 /MT /EHsc /I`"$root\src`" /Fo`"$root\build\\`" /Fe`"$root\build\test_search_rows.exe`" `"$root\tests\test_search_rows.cpp`""
 if ($LASTEXITCODE) { throw 'search rows test build failed' }
@@ -75,7 +98,7 @@ cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O2 /MT /EHsc /std:c++17 /DUNICODE /D_U
 if ($LASTEXITCODE) { throw 'race test build failed' }
 # The script call sites (race.cpp ScriptSite, found by their bytes): our built modules, the three real packages, the rebuilt copies.
 & (Join-Path $root 'build\test_race.exe') (Join-Path $root 'menus\out\results.smosbin') "$game\Scripts\FrontEndScripts.sbn" $packSbn `
-    (Join-Path $root 'reference\metal-sonic-1.1.2\FrontEndScripts.sbn') (Join-Path $root 'reference\rebuilt-menus') | Select-String -NotMatch '^    log:'
+    (Join-Path $root 'reference\metal-sonic-1.1.2\FrontEndScripts.sbn') (Join-Path $root 'reference\rebuilt-menus') $(if (Test-Path $localSbn) { $localSbn }) | Select-String -NotMatch '^    log:'
 $fail += $LASTEXITCODE
 # The author's marks (src/fingerprint.h) are in the built DLL, and the finder sees none in a file without them.
 # (The finder is the author's own tool: not in the public source tree.)
@@ -83,6 +106,11 @@ if (Test-Path (Join-Path $root 'tools\find_fingerprint.py')) {
     python -I (Join-Path $root 'tools\find_fingerprint.py') --expect-all (Join-Path $root 'out\Steam Multiplayer\runtime\SteamMultiplayer.dll')
     $fail += $LASTEXITCODE
     python -I (Join-Path $root 'tools\find_fingerprint.py') --expect-none (Join-Path $root 'out\Steam Multiplayer\runtime\steam_api.dll')
+    $fail += $LASTEXITCODE
+}
+# The Public / Testing mod switch (the author's own tool: not in the public source tree).
+if (Test-Path (Join-Path $root 'tests\test_mod_switch.py')) {
+    python -I (Join-Path $root 'tests\test_mod_switch.py')
     $fail += $LASTEXITCODE
 }
 $work = Join-Path $root 'build\offline'

@@ -39,17 +39,22 @@ for op in group["operations"]:
 # members, so each operation also carries a variant made on Metal Sonic 1.1.0 Beta 3's version (the same payloads in the standalone mod
 # and the Roster Pack layer), used when that is the installed content, and is optional: a Metal Sonic whose member differs (a later
 # update) keeps its own and only the A picture and the wording are missing, instead of the loader starting no mod.
+# 1.2: the navigator scenes and the 14 race results scenes also carry the controller pictures (tools/pad_glyphs.py); Metal Sonic's
+# results scenes are the same in every version so far (Beta 3 to 1.1.5), so they add one variant each.
 keys = root / "build" / "keys"
 # Metal Sonic's versions of these members, each a base under reference\navigator-bases (file suffix for its variant payloads).
 # 1.1.4 (2026-10-27) adds "METAL SONIC" to its 7 navigator_info scenes; its other 19 members are 1.1.3's (= Beta 3's), so they
 # add no second variant (the loader refuses two variants over the same payload).
-METALS = {"metal-sonic-1.1.0-beta.3": ".metal-sonic.dat", "metal-sonic-1.1.4": ".metal-sonic-114.dat"}
+# 1.2: a racer pack's versions too (`racer-pack`, its own 8 scenes; its other 32 members are Metal Sonic's, so no second variant).
+METALS = {"metal-sonic-1.1.0-beta.3": ".metal-sonic.dat", "metal-sonic-1.1.4": ".metal-sonic-114.dat", "racer-pack-1.0.3": ".racer-pack.dat"}
 def keys_stamp():
     try:
         s = json.loads((keys / "keys.json").read_text(encoding="utf-8"))
         ok = s["tool_sha256"] == sha(root / "tools" / "footer_keys.py") and all(
             s["inputs"][name] == sha(root / "tools" / name) for name in ("steam_tiles.py", "text_tables.py", "dialog_icons.py", "scene_container.py", "lobby_bars.py",
-                                                                        "egg_lobby.py", "mod_icons.py", "lobby_drift_row.py", "codexui/build_ui.py", "codexui/decode_ui_texture.py", "codexui/probe.py")) and all(
+                                                                        "egg_lobby.py", "mod_icons.py", "lobby_drift_row.py", "codexui/build_ui.py", "codexui/decode_ui_texture.py", "codexui/probe.py",
+                                                                        "pad_glyphs.py")) and all(
+            s["inputs"][name] == sha(root / name) for name in ("reference/pad-glyphs/cells.json", "reference/pad-glyphs/cells.bin")) and all(
             sha(keys / base / Path(op["payload"]).name) == op["payload_sha256"] for base, g in s["bases"].items() for op in g["operations"]) and all(
             base in s["bases"] for base in METALS)
         return s if ok else None
@@ -74,7 +79,7 @@ for op in stamp["bases"]["stock"]["operations"]:
             continue  # (this Metal version's member is an earlier one's: that variant serves both)
         variant = op["payload"].replace(".dat", suffix)
         shutil.copy2(keys / base / Path(m["payload"]).name, mod / variant)
-        entry["variants"].append({"over_mod": "metal-sonic", "over_payload_sha256": m["base_stored_sha256"], "payload": variant,
+        entry["variants"].append({"over_mod": base.rsplit("-", 1)[0].removesuffix("-1.1.0"), "over_payload_sha256": m["base_stored_sha256"], "payload": variant,
                                   "payload_sha256": m["payload_sha256"], "stored_size": m["stored_size"]})
     group["operations"].append(entry)
 sys.path.insert(0, str(root / "tools"))

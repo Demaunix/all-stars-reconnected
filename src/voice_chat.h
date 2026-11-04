@@ -2,6 +2,7 @@
 // Voice chat on Steam: the worker-side class (voice.cpp; the pure parts are voice.h). Steam worker thread only.
 #include <stdint.h>
 #include "voice.h"
+#include "net_budget.h"
 
 struct VoiceAudio;   // the mod's XAudio2 engine (voice.cpp)
 struct VoiceTalker;  // one member's playout voice and ring
@@ -37,5 +38,6 @@ private:
     VoiceAudio* m_audio = nullptr;
     VoiceTalker* m_talkers[8] = {};
     int m_talkerCount = 0;
-    uint32_t m_sent = 0, m_received = 0, m_badPackets = 0;
+    uint32_t m_sent = 0, m_received = 0, m_badPackets = 0, m_overBudget = 0;
+    NetBudget m_budget;  // each member's voice packets a second (a flood would keep the worker decoding; notes\SAFETY.md F2)
 };

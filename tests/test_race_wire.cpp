@@ -5,6 +5,7 @@
 #include <vector>
 #include "race_wire.h"
 #include "playout.h"
+#include "net_budget.h"
 
 static int g_fail = 0, g_checks = 0;
 #define CHECK(c) do { ++g_checks; if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); ++g_fail; } } while (0)
@@ -584,7 +585,95 @@ static void TestEvent() {
     CHECK(EncodeContract(c, buf, sizeof(buf)) == 0);
 }
 
+// The message budget and the full queue's choice (net_budget.h; notes\SAFETY.md F2).
+static void TestNetBudget() {
+    NetBudget b;
+    uint32_t now = 1000;
+    int taken = 0;
+    for (int i = 0; i < 2000; ++i) taken += b.Take(7, now);  // a burst of 2000 at once: the burst allowance only
+    CHECK(taken == (int)kNetBurst);
+    bool first = false;
+    CHECK(!b.Take(7, now, &first) && !first);  // (still over: not its first drop)
+    now += 1000;                               // a second later: a second's worth again
+    taken = 0;
+    for (int i = 0; i < 2000; ++i) taken += b.Take(7, now);
+    CHECK(taken == (int)kNetRatePerSecond);
+    // A normal sender is untouched by the flooder: 60 a second for 10 s, all taken.
+    taken = 0;
+    for (int t = 0; t < 600; ++t) taken += b.Take(9, now + t * 17);
+    CHECK(taken == 600);
+    // More senders than entries: the quietest is replaced; nothing breaks.
+    for (uint64_t id = 100; id < 140; ++id) CHECK(b.Take(id, now + 20000 + (uint32_t)id));
+    // A clock going back gives nothing extra.
+    NetBudget c;
+    for (int i = 0; i < 400; ++i) c.Take(5, 50000);
+    CHECK(!c.Take(5, 40000));
+
+    // The full queue: the sender with the most queued loses its oldest unreliable message, else its oldest; when the incoming
+    // message's sender has the most and nothing queued, the incoming one goes.
+    struct M { uint64_t peer; bool reliable; };
+    M q[8] = {{1, true}, {2, false}, {2, true}, {2, false}, {3, false}, {2, true}, {1, false}, {3, true}};
+    CHECK(NetEvictIndex(q, 8, 1) == 1);  // sender 2 has 4: its oldest unreliable (index 1)
+    M r[6] = {{2, true}, {2, true}, {2, true}, {1, false}, {3, false}, {1, true}};
+    CHECK(NetEvictIndex(r, 6, 4) == 0);  // sender 2 sent only reliable: its oldest
+    M s[3] = {{1, false}, {2, false}, {3, false}};
+    CHECK(NetEvictIndex(s, 3, 1) == 0);  // a tie: the incoming sender (1) counts 2, the most: its oldest
+    M one[1] = {{5, false}};
+    CHECK(NetEvictIndex(one, 1, 6) == -1);  // a tie: the incoming sender counts first; it has nothing queued, so its message goes
+}
+
+// A fire event's launch data (FireLaunchValid; notes\SAFETY.md F6).
+static void TestFireLaunch() {
+    auto fire = [](uint32_t gadget, uint8_t kind) {
+        RaceEvent e = {};
+        e.race = 1;
+        e.kind = kind;
+        e.size = EventBodySize(kind);
+        memcpy(e.body + kFireGadgetAt, &gadget, 4);
+        float f[24] = {};
+        f[0] = 120.5f; f[1] = -3.0f; f[2] = 88.0f;  // position
+        f[7] = 1.0f;                                 // rotation (0,0,0,1), as the game's default frame
+        f[12] = 40.0f;                               // velocity
+        for (int i = 16; i < 24; ++i) f[i] = 2.5f;   // the two speed values
+        memcpy(e.body + kFireFloatsAt, f, sizeof(f));
+        return e;
+    };
+    const uint32_t gadgets[] = {0x84418b5f, 0x5f724da9, 0x7711877d, 0xd045a8ca, kFireRawA, kFireRawB, 0x26e96da5, 0xb678e022};
+    for (uint32_t gd : gadgets)
+        for (uint8_t kind = 1; kind <= 2; ++kind) {
+            RaceEvent e = fire(gd, kind);
+            CHECK(FireLaunchValid(e));
+            for (int i = 0; i < 24; ++i) {  // not a number anywhere in the 24: forged (but an aimed fire's position.w, maybe unset)
+                RaceEvent bad = e;
+                uint32_t nan = 0x7fc00000;
+                memcpy(bad.body + kFireFloatsAt + i * 4, &nan, 4);
+                CHECK(FireLaunchValid(bad) == (kind == 2 && i == 3));
+            }
+        }
+    CHECK(!FireLaunchValid(fire(kFireNever, 1)));     // never fired by the game
+    RaceEvent give = fire(kFireNever, 0);
+    give.size = EventBodySize(0);
+    CHECK(FireLaunchValid(give));                      // (only fires are checked)
+    RaceEvent far = fire(kFireRawA, 1);
+    float x = 2e5f;
+    memcpy(far.body + kFireFloatsAt, &x, 4);
+    CHECK(!FireLaunchValid(far));                      // a raw-launch item far off the course
+    RaceEvent farOther = fire(0x84418b5f, 1);
+    memcpy(farOther.body + kFireFloatsAt, &x, 4);
+    CHECK(FireLaunchValid(farOther));                  // (an item whose launch the game rebuilds from its own packed data)
+    RaceEvent spin = fire(kFireRawB, 2);
+    float q = 3.0f;
+    memcpy(spin.body + kFireFloatsAt + 7 * 4, &q, 4);
+    CHECK(!FireLaunchValid(spin));                     // not a unit rotation
+    RaceEvent fast = fire(kFireRawB, 1);
+    float v = 5e4f;
+    memcpy(fast.body + kFireFloatsAt + 12 * 4, &v, 4);
+    CHECK(!FireLaunchValid(fast));                     // a speed no kart reaches
+}
+
 int main() {
+    TestNetBudget();
+    TestFireLaunch();
     TestContract();
     TestEvent();
     TestSmall();

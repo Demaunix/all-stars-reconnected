@@ -65,6 +65,9 @@ static bool g_installed = false;
 static bool g_done = false;  // substitution happens on the first FrontEndScripts parse only
 static uint8_t* g_entryField[kTargetCount];
 static int g_chosen[kTargetCount] = {-1, -1, -1, -1, -1};  // module index per target once substituted
+static bool g_stockRacers = false;  // a racer pack that stays local: online uses the stock list whatever its network module lists
+
+void ScriptSubstUseStockRacers() { g_stockRacers = true; }
 
 static bool Sha256Hex(const void* data, size_t n, char out[65]) {
     BCRYPT_ALG_HANDLE alg = nullptr;
@@ -114,6 +117,8 @@ static void __cdecl BeforeParse(uint8_t* pkg) {
             bool isModule = memcmp(mod, "smosbinL", 8) == 0 && Sha256Hex(mod, U32(mod + 8), sha);
             for (const Accept& a : g_targets[t].accept)
                 if (isModule && a.origSha256 && strcmp(sha, a.origSha256) == 0) chosen[t] = a.module;
+            // (ours replaces the whole module, so the pack's rows are gone and an update of the pack changes nothing here)
+            if (g_stockRacers && isModule && (t == 2 || t == 3)) chosen[t] = kModNetStock;
             if (chosen[t] < 0) {
                 Log(true, L"multiplayer menus: off (the installed %hs script is not one this version was built for; sha256 %hs)",
                     g_targets[t].name, isModule ? sha : "not a module");

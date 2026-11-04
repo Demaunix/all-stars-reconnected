@@ -36,6 +36,10 @@ bool LobbyPostArgs(LobbyCommandKind kind, const int32_t* args, int count) {
     return true;
 }
 void LobbyRead(LobbySnapshot& out) { out = g_fake; }
+// The controller pictures (src\pad_glyphs.cpp has its own test): the pad's Back button held, faked.
+static bool g_padBack = false;
+void PadGlyphsFrame() {}
+bool PadGlyphsInviteHeld() { return g_padBack; }
 
 // The race module, faked: natives only route to it.
 #include "race.h"
@@ -930,6 +934,22 @@ int main() {
         d = Call(kNatInviteKey, nullptr, nullptr, 0);
         Check(d.ret == 1, "invite key: a fresh press after the gap counts");
         g_fakeKeyDown = 0;
+        // 1.2: a controller's Back / View button does the same, with the same edge rules.
+        Call(kNatInviteKey, nullptr, nullptr, 0);
+        g_padBack = true;
+        d = Call(kNatInviteKey, nullptr, nullptr, 0);
+        Check(d.ret == 1, "invite key: the pad's Back button pressed");
+        d = Call(kNatInviteKey, nullptr, nullptr, 0);
+        Check(d.ret == 0, "invite key: the pad's Back still held: no second press");
+        g_padBack = false;
+        Call(kNatInviteKey, nullptr, nullptr, 0);
+        g_overlay = 1;
+        g_padBack = true;
+        d = Call(kNatInviteKey, nullptr, nullptr, 0);
+        Check(d.ret == 0, "invite key: not the pad's Back while the Steam overlay is open");
+        g_overlay = 0;
+        g_padBack = false;
+        Call(kNatInviteKey, nullptr, nullptr, 0);
     }
     // PRIVATE SLOTS: the public seats a public search allows (8 seats, 0-7 private).
     Check(PublicSeats("0,3,0,1,1,1") == 8, "public seats: no private slots");

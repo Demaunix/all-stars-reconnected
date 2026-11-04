@@ -9,3 +9,5 @@
 // Config: <mod>\config.ini [Menus] Enabled=1 (0 keeps the game's own menus).
 void ScriptSubstInstall(HMODULE gameImage, const std::wstring& modDir);
 void ScriptSubstRollback();
+// Before the game's first parse: offer the stock 21 racers online, whatever the installed network module lists (modset.h ModLocalOnly).
+void ScriptSubstUseStockRacers();

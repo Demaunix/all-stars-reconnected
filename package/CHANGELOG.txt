@@ -1,6 +1,25 @@
 Steam Multiplayer - changelog
 
 {VERSION}
+- Controller button pictures: playing with a controller, the online menus (the lobby,
+  the game list, the online results and the online pause menu) show the controller's
+  own buttons instead of the keyboard's keys, with the consoles' own pictures: Xbox
+  buttons, or PlayStation buttons for a PlayStation controller (found through Steam
+  Input). Keyboard players keep the keys, and the game's other menus are unchanged.
+  [Menus] PadPictures in config.ini picks them yourself (auto, xbox, playstation,
+  keys).
+- INVITE FRIENDS (lobby) and VIEW PROFILE (game list) on a controller: the Back /
+  View button (Share / Create on a PlayStation controller).
+- Crash fixed: a game on the online results could crash when the host left at that
+  moment (Steam gave no answer for a player who had just gone). 1.1.1 has this crash too.
+- Safer lobbies against a modified game: a flood of messages no longer slows or freezes
+  the others' games, a finish time that can't be possible is refused, a kicked player
+  can't stay in the way of Start, after the host leaves only the race's own host can
+  send the results, and a broken item launch is refused. A modified game can still
+  cheat in other ways (each car's own game decides its physics and hits).
+- Metal Sonic 1.1.5: its menus get the A key picture and the controller pictures too.
+
+1.1.1
 - Works next to mods that change the game's menu scripts in memory: the places in
   the menu scripts the mod watches (the main menu's Steam-join check, the way back to
   the lobby after a race, the pause and results menus, the HUD tags) are now found by

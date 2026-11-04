@@ -9,6 +9,8 @@
 //        test_script_subst.exe other <either package>
 //          One byte of its fe_network_game is changed first: nothing is substituted and the log
 //          says why.
+//        test_script_subst.exe local | localother <a local racer pack's FrontEndScripts.sbn>
+//          The game has a racer pack that stays local: the stock 21-racer module, with its network module as shipped or changed.
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -21,6 +23,7 @@ void ScriptSubstTestBeforeParse(uint8_t* pkg);
 const uint8_t* ScriptSubstTestBuffer(size_t i);
 bool ScriptSubstTestIsStock(size_t i);
 bool ScriptSubstTestIsMetal(size_t i);
+void ScriptSubstUseStockRacers();
 
 static std::vector<std::wstring> g_log;
 void Log(bool, const wchar_t* fmt, ...) {
@@ -64,12 +67,16 @@ static std::vector<const uint8_t*> SimulateParse(uint8_t* pkg) {
 
 int main(int argc, char** argv) {
     if (argc < 3) return 2;
-    const bool stock = strcmp(argv[1], "stock") == 0;
+    // A racer pack that stays local: the stock network module, also when an update of the pack changed its own (localother).
+    const bool localOther = strcmp(argv[1], "localother") == 0;
+    const bool local = localOther || strcmp(argv[1], "local") == 0;
+    const bool stock = local || strcmp(argv[1], "stock") == 0;
     const bool metal = strcmp(argv[1], "metal") == 0;  // the standalone Metal Sonic 1.1.2's package
     const bool pack = stock || metal || strcmp(argv[1], "pack") == 0;  // "pack": substitution expected
     CHECK(ScriptSubstTestPrepare());
+    if (local) ScriptSubstUseStockRacers();
     std::vector<uint8_t> pkg = ReadAll(argv[2]);
-    if (!pack) {  // corrupt one code byte of fe_network_game (entry hash 8398d0bc)
+    if (!pack || localOther) {  // corrupt one code byte of fe_network_game (entry hash 8398d0bc)
         for (uint32_t i = 0; i < U32(pkg.data() + 12); ++i) {
             uint8_t* e = pkg.data() + 40 + 32 * i;
             if (U32(e + 16) == 0x8398d0bc) (e + 28 + U32(e + 28))[0x100] ^= 1;

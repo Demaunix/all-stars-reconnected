@@ -692,6 +692,34 @@ inline bool DecodeFinished(const void* data, size_t size, RaceFinish& f) {
 }
 
 // ---------------------------------------------------------------- Event
+// A fire event's launch data (notes\SAFETY.md F6): the owner's game always writes the 24 floats at event +0x40..+0x9f
+// (position, rotation, direction, velocity and two speed values, 4 lanes each; body +0x38..+0x97: the one producer 0x538bf0
+// copies its whole launch frame), so one that isn't finite is forged. Two items feed them raw into their projectile (spawns at
+// 0x53b09e / 0x53b3e1): those must also be in the pose check's ranges (position within 1e5 m, a unit rotation, the rest within
+// 1e4). Item 94749a0f is never fired (its builder returns at 0x538c3c). The rest of the event (+0xa0 on) is packed bits. An
+// aimed fire (kind 2) takes its position from a raycast hit (0x538f61) whose 4th lane may be left unset: never checked.
+constexpr uint32_t kFireRawA = 0x953d2512, kFireRawB = 0xd8ae59cb, kFireNever = 0x94749a0f;
+constexpr uint16_t kFireFloatsAt = 0x38, kFireGadgetAt = 0xc - 8;
+inline bool FireLaunchValid(const RaceEvent& e) {
+    if (e.kind != 1 && e.kind != 2) return true;
+    if (e.size < kFireFloatsAt + 24 * 4) return false;
+    uint32_t gadget;
+    memcpy(&gadget, e.body + kFireGadgetAt, 4);
+    if (gadget == kFireNever) return false;
+    float f[24];
+    memcpy(f, e.body + kFireFloatsAt, sizeof(f));
+    for (int i = 0; i < 24; ++i)
+        if (!(i == 3 && e.kind == 2) && !wire::Finite(f[i])) return false;
+    if (gadget != kFireRawA && gadget != kFireRawB) return true;
+    for (int i = 0; i < 3; ++i)
+        if (f[i] < -1e5f || f[i] > 1e5f) return false;  // position xyz
+    float q = f[4] * f[4] + f[5] * f[5] + f[6] * f[6] + f[7] * f[7];
+    if (q < 0.81f || q > 1.21f) return false;  // rotation
+    for (int i = 0; i < 24; ++i)
+        if (((i == 3 && e.kind != 2) || i >= 8) && (f[i] < -1e4f || f[i] > 1e4f)) return false;
+    return true;
+}
+
 // Valid: a carried kind with its exact body size, a grid slot.
 inline bool EventValid(const RaceEvent& e) { return e.race && e.slot < kGridSlots && EventBodySize(e.kind) && e.size == EventBodySize(e.kind); }
 

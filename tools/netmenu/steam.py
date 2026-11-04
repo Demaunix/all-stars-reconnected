@@ -1179,6 +1179,7 @@ def make_chunks(original):
     c.get(base.DELAY).num(0).raw(b'\x48').branch('browse_inputs')
     c.get(base.DELAY).num(1).raw(b'\x43').put(base.DELAY).branch('search_done', 0x15)
     c.label('browse_inputs').native(0x041a, 0, drop=False).branch('browse_create')
+    nat(c, NAT_LEAVE, drop=True)  # 1.2: the session ends with the screen (as the searching Back's), so the menus behind it aren't "online"
     search.return_mainmenu(c)
     c.branch('search_done', 0x15)
     c.label('browse_create').native(0x041d, 0, drop=False).branch('browse_join')

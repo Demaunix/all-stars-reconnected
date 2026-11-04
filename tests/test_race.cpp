@@ -56,7 +56,9 @@ static void FakeModule(uint8_t* m, size_t size) {
 }
 
 // ---------------------------------------------------------------- fakes: log, lobby, network
+static int g_logCount = 0;  // every log line (a flood must not make many: each opens the log file on the game thread)
 void Log(bool, const wchar_t* fmt, ...) {
+    ++g_logCount;
     va_list ap;
     va_start(ap, fmt);
     wprintf(L"    log: ");
@@ -155,6 +157,9 @@ static uint8_t g_finishCount = 0;
 static uint8_t g_finishList[16][8];
 static uint32_t g_raceOver = 0;
 static uint32_t g_tickRate = 50;
+// The race clock (0xcf7a80, ticks since GO): each test race starts 120 s in, so the other players' finishes are possible
+// (FinishPlausible) and the call-outs live (> 8).
+static uint32_t g_raceClock = 6000;
 struct NavCall { void* racer; uint32_t nav; };
 static std::vector<NavCall> g_navCalls;
 static std::vector<std::pair<uint32_t, uint32_t>> g_added;  // AddFinish(index, reason) calls
@@ -391,6 +396,7 @@ static void Reset() {
     memset(g_states, 0, sizeof(g_states));
     memset(g_queuedState, 0, sizeof(g_queuedState));
     g_sortedFake = g_tiesReversed = false;
+    g_raceClock = 6000;
 }
 
 static void Lobby(uint64_t self, bool host, int racerA, int racerB) {
@@ -1389,6 +1395,11 @@ static void TestEggCourse() {
     RaceUseRacerList(kRacerListMetal);
     CHECK(RaceRacerHash(21) == 0x9cabac57 && RaceRacerHash(0) == kRacersStock[0].hash && RaceRacerHash(20) == kRacersStock[20].hash);
     CHECK(RaceRacerHash(22) == 0 && RaceRacerOn(21));
+    // The stock list's last row (20): a stock game never offers it, only a racer pack that stays offline turns it on.
+    CHECK(RaceRacerOn(20));
+    RaceUseRacerList(kRacerListStock);
+    CHECK(RaceRacerHash(20) == 0x04f8af71 && !RaceRacerOn(20) && RaceRacerOn(19));
+    RaceUseRacerList(kRacerListMetal);
     RaceLobbyMods(true, false);
     CHECK(!RaceRacerOn(21) && RaceRacerOn(20));
     for (int n = 0; n < 25; ++n) CHECK(RaceTestPlayerRacer(n, taken, 1) != 21);
@@ -4450,7 +4461,7 @@ void RaceTestSetFair(bool hooks, float roll, int coin);
 int RaceTestMentions(int k);
 static float g_overtakeCd = 45.0f, g_alertCd = 50.0f;
 static uint8_t g_placeList[8][8];
-static uint32_t g_raceClock = 100, g_generic = 0;
+static uint32_t g_generic = 0;
 static uint8_t g_commentOff = 0, g_calloutsLive = 1, g_offSeen = 0xff;
 static int32_t g_raceMode = 1;
 static uint8_t g_trackers[8][0x100], g_voices[8][0x800];
@@ -4660,14 +4671,14 @@ static void TestFairCalls() {
         *(uint32_t*)(g_records[k] + 0x68) = t;
         Append((uint8_t)k, reason);
     };
-    finish(3, 0x1000, 1);  // a computer racer wins: no line
-    finish(1, 0x2000, 1);  // the guest's car, at this game's view of its crossing: not yet (its own time comes with its Finished)
+    finish(3, 0x600000, 1);  // a computer racer wins: no line (times from 30 s: FinishPlausible)
+    finish(1, 0x700000, 1);  // the guest's car, at this game's view of its crossing: not yet (its own time comes with its Finished)
     ++g_tick;
     UHook(kHRacing)(nullptr, nullptr);
     CHECK(g_requests.empty());
     {
         uint8_t buf[kWireMax];
-        RaceFinish theirs = {c.race, 1, 1, 0x2000, 0x1000};
+        RaceFinish theirs = {c.race, 1, 1, 0x700000, 0x1000};
         Deliver(B, buf, EncodeFinished(theirs, buf, sizeof(buf)));
     }
     ++g_tick;
@@ -4676,8 +4687,8 @@ static void TestFairCalls() {
     ++g_tick;
     UHook(kHRacing)(nullptr, nullptr);
     CHECK(g_requests.size() == 1);  // (once)
-    finish(5, 0x3000, 1);
-    finish(0, 0x4000, 1);  // the host's own car, 4th, while the guest's line is still said: skipped
+    finish(5, 0x800000, 1);
+    finish(0, 0x900000, 1);  // the host's own car, 4th, while the guest's line is still said: skipped
     ++g_tick;
     UHook(kHRacing)(nullptr, nullptr);
     CHECK(g_requests.size() == 1);
@@ -6778,8 +6789,9 @@ static const ScriptSiteDef* SiteNamed(const char* name) {
 }
 
 // A real package: every site once in its module, at an offset this build knows, and in no other module (the bytes identify the
-// module too). The main menu's join check is in our fe_mainmenu build only: absent from the package's.
-static void TestSitesInPackage(const char* label, const char* path) {
+// module too). The main menu's join check is in our fe_mainmenu build only: absent from the package's. `moved`: another mod's package,
+// whose rebuilt modules may hold a site anywhere (the bytes find it; only the log says it moved).
+static void TestSitesInPackage(const char* label, const char* path, bool moved = false) {
     printf("script sites: the %s package: every site once in its module, nowhere else\n", label);
     size_t size = 0;
     const uint8_t* pkg = LoadBytes(path, &size);
@@ -6805,7 +6817,7 @@ static void TestSitesInPackage(const char* label, const char* path) {
                 continue;
             }
             if (!pc || !KnownAt(s, pc)) printf("  %s: at +%#x in module %08x (this build knows +%#x)\n", s.name, pc, m.hash, s.known[0]);
-            CHECK(pc && KnownAt(s, pc));
+            CHECK(pc && (moved || KnownAt(s, pc)));
             CHECK(pc && memcmp(m.bytes + pc + s.from, s.code, s.n) == 0);
         }
         CHECK(own);
@@ -7105,6 +7117,79 @@ static void TestRealTimeClock() {
     g_raceClock = keep;
 }
 
+// ---------------------------------------------------------------- hostile messages (notes\SAFETY.md)
+static int SentGoTo(uint64_t peer) {
+    int n = 0;
+    for (const RaceNetMsg& m : g_sent) {
+        uint32_t r;
+        uint8_t stage;
+        n += m.peer == peer && DecodeGo(m.data, m.size, r, stage);
+    }
+    return n;
+}
+
+static void TestHostileMessages() {
+    printf("hostile messages: floods, impossible finishes, a lobby owner who isn't the race's host\n");
+    uint8_t buf[kWireMax];
+    // F1: a member who isn't the host floods contracts: a handful of log lines, not one per message.
+    RaceContract c = HostRunning();
+    NativeCall td = {};
+    NHook(kH090a)(nullptr, &td);
+    Reset();
+    Lobby(B, false, 0, 1);
+    int before = g_logCount;
+    for (int i = 0; i < 200; ++i) Deliver(A + 77, buf, EncodeContract(c, buf, sizeof(buf)));
+    RaceMenuPoll();
+    CHECK(g_logCount - before <= 5 && RaceTestPhase() == kIdle);
+
+    // F2: a guest floods Loaded for a stage already released: one Go back, not one per message.
+    c = HostRunning();
+    for (int i = 0; i < 50; ++i) Deliver(B, buf, EncodeLoaded(c.race, kStageCountdown, 1, buf, sizeof(buf)));
+    UHook(kHRacing)(nullptr, nullptr);
+    CHECK(SentGoTo(B) == 1);
+
+    // F4: a finish that can't be true is refused (and the race doesn't end or start RACE ENDS IN for it); a real one counts.
+    auto finish = [&](uint8_t reason, uint32_t ticks) {
+        RaceFinish f = {c.race, 1, reason, ticks << 12, 0x1000};
+        Deliver(B, buf, EncodeFinished(f, buf, sizeof(buf)));
+        UHook(kHRacing)(nullptr, nullptr);
+    };
+    g_raceClock = 6000;    // 120 s in
+    finish(4, 3300);       // a reason the results never use
+    finish(1, 1);          // 20 ms for 3 laps
+    finish(1, 1400);       // 28 s for 3 laps (under 10 s a lap)
+    CHECK(g_added.empty() && !g_raceOver);
+    finish(1, 10000);      // a crossing 200 s in, later than this game's clock: only noted (the others' GO may be earlier)
+    CHECK(g_added.size() == 1 && g_added[0].first == 1 && *(uint32_t*)(g_records[1] + 0x68) == (10000u << 12));
+    NHook(kH090a)(nullptr, &td);
+    // Read right after a long stall (this game's race clock still behind, or this race started later): the finish waits until
+    // this race has run long enough, then counts (the independent check's case: a refused real finish became a DNF everywhere).
+    c = HostRunning();
+    g_raceClock = 100;     // 2 s in by this clock
+    finish(1, 3300);       // (66 s)
+    CHECK(g_added.empty());
+    UHook(kHRacing)(nullptr, nullptr);
+    CHECK(g_added.empty());
+    g_raceClock = 6000;    // the clock caught up
+    UHook(kHRacing)(nullptr, nullptr);
+    CHECK(g_added.size() == 1 && *(uint32_t*)(g_records[1] + 0x68) == (3300u << 12));
+    NHook(kH090a)(nullptr, &td);
+
+    // F5: the race's host leaves and Steam makes another member the lobby's owner: its Results aren't the race's.
+    c = Guest3Running();
+    g_snap.members[0] = {C3, "C", 1, 0, 3, 1, 1, -1};  // C owns the lobby now; A is gone
+    g_snap.members[1] = {B, "Bravo 2", 0, 1, 1, 1, 1, -1};
+    g_snap.memberCount = 2;
+    RaceResults res = {};
+    res.race = c.race;
+    for (int k = 0; k < kGridSlots; ++k) { res.cars[k].reason = 1; res.cars[k].rank = (uint8_t)k; res.cars[k].time = (0x7000u + k) << 12; }
+    Deliver(C3, buf, EncodeResults(res, buf, sizeof(buf)));
+    UHook(kHRacing)(nullptr, nullptr);
+    CHECK(*(uint32_t*)(g_records[3] + 0x68) != (0x7003u << 12));
+    NHook(kH090a)(nullptr, &td);
+    RaceTestSetHostAi(false);
+}
+
 int main(int argc, char** argv) {
     RaceTestSetClockAddresses((uintptr_t)&g_appPtr, (uintptr_t)&g_stepAcc, (uintptr_t)&g_stepCount, (uintptr_t)&g_frameSteps,
                               (uintptr_t)&g_raceClock);
@@ -7158,6 +7243,7 @@ int main(int argc, char** argv) {
     TestLateAndGone();
     TestTimeout();
     TestRealTimeClock();
+    TestHostileMessages();
     TestPlayersDnf();
     TestRecordFinishAndRetry();
     TestBadges();
@@ -7209,6 +7295,7 @@ int main(int argc, char** argv) {
     if (argc > 3) TestSitesInPackage("Roster Pack", argv[3]);
     if (argc > 4) TestSitesInPackage("Metal Sonic 1.1.2", argv[4]);
     if (argc > 5) TestRebuiltModules(argv[5]);
+    if (argc > 6) TestSitesInPackage("local racer pack", argv[6], true);
     printf("race bridge: %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }
