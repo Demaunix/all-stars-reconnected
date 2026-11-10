@@ -49,7 +49,8 @@ struct LobbyRow {
     int32_t otherMods;     // the host's mod set differs from ours: shown "(other mods)", the join refused (kLobbyErrMods)
     int32_t flag;          // the host's license nationality code (lobby data "flag"; -1 unknown): the row's flag, as the console's
     int32_t mods;          // 1.1: the row's mod icons in the SIGNAL cell (the console's DLC column): Egg Hangar's modset.h kMod* state in
-                           // bits 0-1, Metal Sonic's in bits 2-3 (unused / the same build / another version / not installed here)
+                           // bits 0-1, Metal Sonic's in bits 2-3, On-Foot Sonic's in 4-5 (unused / the same build / another version /
+                           // not installed here; modset.h ModIcons)
     int32_t otherModsRest; // otherMods because of a mod without an icon: the name still says "(other mods)"
 };
 
@@ -74,6 +75,9 @@ struct LobbyMember {
     int32_t talking;  // voice chat (M7): its voice arrived within the last kVoiceTalkingMs (this player: its own voice went out): the bar's voice icon
     int32_t muted;    // voice chat: this player doesn't hear it (the lobby popup's MUTE, or config.ini [Voice] Muted); the bar is yellow
     int32_t input;    // member data "inp": the device that drives its car (kInput*): the Drift+ rule and Majority Drift Parity
+    // RANDOM (racer == kRacerRandom, src\random_slots.h): its game's hidden pick (member data "rnd"; -1 none) and whether that pick
+    // is a duplicate because nothing was free.
+    int32_t random, randomDup;
 };
 
 // The race rules the host chose (lobby data "rules"); -1 in every field until the host publishes.
@@ -137,15 +141,15 @@ struct LobbySnapshot {
     // Host handovers in this lobby: when the host leaves, Steam passes the lobby on to another member and
     // the lobby goes on with that host (the console's host migration). The lobby script shows a notice.
     int32_t hostChanges;
-    // 1.1: the last join refused for mods (kLobbyErrMods): Egg Hangar's modset.h kMod* state in bits 0-1, Metal Sonic's in bits 2-3
-    // (as LobbyRow::mods), bit 4: other mods differ too (or a mod list was unreadable). The refusal pop-up names them.
+    // 1.1: the last join refused for mods (kLobbyErrMods): the icons' states as LobbyRow::mods (bits 0-5), bit 6: other mods differ
+    // too (or a mod list was unreadable; modset.h kRefusedOtherMods). The refusal pop-up names them.
     int32_t refusedMods;
 };
-enum : int32_t { kRefusedOther = 16 };
+enum : int32_t { kRefusedOther = 64 };  // (= modset.h kRefusedOtherMods; 16 was this bit before On-Foot Sonic's icon took bits 4-5)
 
 enum LobbyCommandKind : int32_t {
     kCmdHost, kCmdSearch, kCmdJoinRow, kCmdLeave,
-    kCmdSetLocal,  // args: racer index (-1 none), ready (0/1)
+    kCmdSetLocal,  // args: racer index (-1 none; kRacerRandom), ready (0/1), RANDOM's hidden pick (-1 none), the pick is a duplicate (0/1)
     kCmdSetRules,  // args: LobbyRules fields in order (host only; ignored otherwise)
     kCmdInvite,    // the Steam overlay's invite dialog for the current lobby (no args; ignored outside a lobby)
     kCmdJoinLobby, // args[0..1]: a Steam lobby id (low, high dword): join it, leaving the current one (a Steam Join Game)
@@ -178,7 +182,7 @@ void LobbyNoteFlag(int32_t code);
 // ENABLE MODIFICATIONS (1.1, notes\ENABLE-MODS.md): whether this game has the toggleable mod `id` installed (complete scan only),
 // and the host's answers for the lobby it creates next (game thread, before the Host command; the worker reads them at creation).
 bool LobbyModInstalled(const char* id);
-void LobbySetHostMods(bool metalOn, bool eggOn);
+void LobbySetHostMods(bool metalOn, bool eggOn, bool onFootOn);
 // The device that drives this game's car: the class of the primary pad (re\drift-plus\FINDINGS.md; game thread, every lobby
 // frame), for the member data "inp".
 enum : int32_t { kInputUnknown = 0, kInputKeyboard = 1, kInputController = 2 };  // (0: a zeroed member is unknown)
@@ -201,6 +205,7 @@ struct RaceNetMsg {
     uint64_t peer;   // sender (inbound) or recipient (outbound; 0 = every other lobby member)
     uint32_t size;
     bool reliable;
+    uint32_t arrived;  // inbound: GetTickCount() | 1 when the worker took it from Steam (0 = unknown)
     uint8_t data[kRaceMsgMax];
 };
 bool RaceNetSend(uint64_t to, const void* data, size_t size, bool reliable);

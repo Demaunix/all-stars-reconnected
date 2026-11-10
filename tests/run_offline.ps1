@@ -21,6 +21,18 @@ cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O2 /MT /EHsc /I`"$root\src`" /Fo`"$roo
 if ($LASTEXITCODE) { throw 'steer test build failed' }
 & (Join-Path $root 'build\test_steer.exe')
 $fail += $LASTEXITCODE
+# RANDOM racer slots (src/random_slots.h).
+cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O2 /MT /EHsc /I`"$root\src`" /Fo`"$root\build\\`" /Fe`"$root\build\test_random.exe`" `"$root\tests\test_random.cpp`""
+if ($LASTEXITCODE) { throw 'random test build failed' }
+& (Join-Path $root 'build\test_random.exe')
+$fail += $LASTEXITCODE
+# Adding the option lines a kept config.ini lacks (src/config_merge.h; the template from package/config.ini).
+python -I (Join-Path $root 'tools\config_embed.py') $root
+if ($LASTEXITCODE) { throw 'config template embed failed' }
+cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O2 /MT /EHsc /I`"$root\src`" /I`"$root\build`" /Fo`"$root\build\\`" /Fe`"$root\build\test_config_merge.exe`" `"$root\tests\test_config_merge.cpp`""
+if ($LASTEXITCODE) { throw 'config merge test build failed' }
+& (Join-Path $root 'build\test_config_merge.exe') (Join-Path $root 'tests\data\config_merge\config-1.1.1.ini') | Select-String -NotMatch '^PASS '
+$fail += $LASTEXITCODE
 # The auto-update (src/update.h). Not "test_update.exe": a 32-bit exe named *update* triggers Windows' installer detection (UAC).
 cmd /c "`"$vc`" >nul 2>nul && cl /nologo /O2 /MT /EHsc /std:c++17 /DUNICODE /D_UNICODE /I`"$root\src`" /Fo`"$root\build\\`" /Fe`"$root\build\test_newversion.exe`" `"$root\tests\test_update.cpp`" bcrypt.lib"
 if ($LASTEXITCODE) { throw 'auto-update test build failed' }
@@ -48,6 +60,10 @@ $fail += $LASTEXITCODE
 & (Join-Path $root 'build\test_script_subst.exe') stock "$game\Scripts\FrontEndScripts.sbn"
 $fail += $LASTEXITCODE
 & (Join-Path $root 'build\test_script_subst.exe') metal (Join-Path $root 'reference\metal-sonic-1.1.2\FrontEndScripts.sbn')
+$fail += $LASTEXITCODE
+& (Join-Path $root 'build\test_script_subst.exe') onfoot (Join-Path $root 'reference\metal-sonic-1.1.2\FrontEndScripts.sbn')
+$fail += $LASTEXITCODE
+& (Join-Path $root 'build\test_script_subst.exe') onfootstock "$game\Scripts\FrontEndScripts.sbn"
 $fail += $LASTEXITCODE
 & (Join-Path $root 'build\test_script_subst.exe') other (Join-Path $root 'reference\metal-sonic-1.1.2\FrontEndScripts.sbn')
 $fail += $LASTEXITCODE

@@ -23,9 +23,11 @@
 #include <random>
 #include <stdio.h>
 #include "lobby.h"
+#include "random_slots.h"
 #include "log.h"
 #include "playout.h"
 #include "steer.h"
+#include "drift_style.h"
 #include "script_abi.h"
 #include "race_tables.h"
 #include "update.h"
@@ -475,6 +477,7 @@ bool g_installed = false;
 bool g_gateHooks = false;       // the gate All-Stars' group is installed
 bool g_steerHooks = false;      // the Drift+ group is installed
 bool g_forceDriftPlusOff = false;  // config.ini [Debug] ForceDriftPlusOff: as host, Drift+ off without a keyboard player
+bool g_sameSideHop = false;        // config.ini [Debug] SameSideHop=1: the keyboard drift fix on (drift_style.h). Off by default since 2026-11-10: the user switches sides ON PURPOSE with the same keys (new arrow held, S let go, quick re-tap)
 uint32_t g_debugStallMs = 0;       // config.ini [Debug] StallMs: freeze this game once, 10 s into each online race (a stutter to test)
 bool g_announcerHooks = false;  // the announcer group is installed
 bool g_fairHooks = false;       // the fair call-outs group is installed
@@ -715,6 +718,10 @@ struct Race {
     uint32_t clockT = 0, clockStep = 0, clockT0 = 0, clockStep0 = 0;
     double clockD = 0, clockD0 = 0;
     uint32_t clockAdded = 0, clockBiggest = 0;
+    // Guest: when the worker took the host's Go for the countdown from Steam (0 = unknown), and how long it then waited for
+    // this game's thread (a long frame here): that wait counts in the race clock like a long frame after the release.
+    uint32_t goArrived = 0;
+    double clockLateMs = 0;
     int clockFixes = 0, clockLogged = 0;
     char names[kMaxHumans][32] = {};  // the humans' Steam names (lobby at Arm), for the HUD's tags
     bool tagLogged[5] = {};           // the tags' log lines, once per race: gate, car, name, unknown label, a computer racer's name
@@ -753,6 +760,14 @@ struct Race {
     float lastPos[kGridSlots][3] = {};
     bool lastPosSet[kGridSlots] = {};
     bool stateLogged[kGridSlots] = {};  // a network car was found in another state (logged once)
+    // On-Foot Sonic's look (notes\ONFOOT-ONLINE.md, wire Look): the latest blob per network car (from its owner) and its tick;
+    // per own car, the sim tick of this game's last send.
+    uint8_t look[kGridSlots][wire::kLookMax] = {};
+    uint8_t lookLen[kGridSlots] = {};
+    uint32_t lookTick[kGridSlots] = {};
+    uint32_t lookSent[kGridSlots] = {};
+    bool lookResolved = false;  // OnFootSonic.dll's two exports looked up for this race
+    int looksIn = 0, looksOut = 0, looksApplied = 0;
     int itemsCleared = 0;               // items dropped from network cars (they never use them)
     bool sorted = false;                // this game's race end has sorted the results (a WFF update saw it over)
     bool orderChecked = false;
@@ -795,6 +810,10 @@ struct Race {
     // race's log lines (the rule acting, a steer value it left alone).
     uint8_t steerOwner = 0;
     bool steerLogged = false, steerSkipLogged = false;
+    // Same-side drift re-press (drift_style.h): its state, the log line, re-presses kept on their side.
+    SameSideState sameSide;
+    bool sameSideLogged = false;
+    int sameSideKept = 0;
 } g;
 uint32_t g_lastRaceId = 0;  // the last race this game took part in (RaceLastId; kept across EndRace)
 
@@ -827,7 +846,9 @@ const uint32_t kEggCourseHash = 0x2c0dae1f;  // name_hash("doomeggzone_dlc")
 bool g_eggHangar = false;
 bool g_eggScanned = false;  // RaceUseEggHangar ran (only after a complete mod scan)
 // ENABLE MODIFICATIONS (RaceLobbyMods): this lobby's use of Egg Hangar and Metal Sonic (on outside a lobby, as 1.0.0).
-bool g_eggLobby = true, g_metalLobby = true;
+bool g_eggLobby = true, g_metalLobby = true, g_onFootLobby = true;
+// On-Foot Sonic (the user's mod, notes\ONFOOT-ONLINE.md): his character hash, as his add-on's racer rows name him.
+const uint32_t kOnFootRacerHash = 0xfecc613a;
 bool CourseUsable(int course) {
     return course >= 0 && course < (int)(sizeof(kCourses) / sizeof(kCourses[0])) &&
            (kCourses[course].hash != kEggCourseHash || (g_eggHangar && g_eggLobby));
@@ -837,8 +858,27 @@ int g_racerCount = 0;
 const uint32_t kStockHiddenRacerHash = 0x04f8af71;
 bool RacerOn(int i) {
     return g_racerList && i >= 0 && i < g_racerCount && (g_metalLobby || strcmp(g_racerList[i].name, "mechasonic") != 0) &&
+           (g_onFootLobby || g_racerList[i].hash != kOnFootRacerHash) &&
            (g_racerList != kRacersStock || g_racerList[i].hash != kStockHiddenRacerHash);
 }
+// The two racers that can't race online (they need a profile only their own PC has).
+bool RacerOnline(int i) {
+    return g_racerList && i >= 0 && i < g_racerCount && strcmp(g_racerList[i].name, "mii") != 0 && strcmp(g_racerList[i].name, "avatar") != 0;
+}
+
+// RANDOM (src\random_slots.h, notes\RANDOM-SLOTS.md): what this game's own lists offer, as the menus asked the game (Hook2003):
+// the racer picker's list is the stock racer list filtered by 2003(72, racer hash) (fe_charselscreen export DC8A3C6D: the
+// profile's unlocks), the course list by 2003(73, course hash). 1 offered, 0 not, -1 never asked.
+static_assert(sizeof(kCourses) / sizeof(kCourses[0]) == kCourseRandom, "RANDOM COURSE is the lobby's entry after the last course");
+const uint32_t kRandomCourseHash = 0xa58e5227;  // name_hash("steammp_random_course"): the lobby's RANDOM COURSE (tools\netmenu\settings.py)
+int8_t g_racerOffered[kRandomMaxRacers], g_courseOffered[kCourseRandom];
+struct OfferedInit {
+    OfferedInit() {
+        memset(g_racerOffered, -1, sizeof(g_racerOffered));
+        memset(g_courseOffered, -1, sizeof(g_courseOffered));
+    }
+} g_offeredInit;
+const uint32_t kQueryRacerAvailable = 72;
 
 const wchar_t* PhaseName(Phase p) {
     static const wchar_t* names[] = {L"idle", L"armed", L"creating", L"created", L"set up", L"hold A", L"intros", L"hold B", L"running", L"failed"};
@@ -956,6 +996,7 @@ void EndRace(const wchar_t* why) {
     CloseNetDialog();
     AnnounceStop(L"the race is over");
     if (g.announceSent) Log(false, L"race: announcer: %d lines went to the other players", g.announceSent);
+    if (g.sameSideKept) Log(false, L"race: drift re-press: %d quick re-presses kept their drift's side", g.sameSideKept);
     if (g.progressSent[0] >= 0) {  // the lobby's race bar: this player races no more (retried from the menus if the queue is full:
         int32_t none[5] = {-1, 0, 0, 0, 0};  // the host's Start waits for it)
         g_progressClearPending = !LobbyPostArgs(kCmdSetProgress, none, 5);
@@ -1008,7 +1049,10 @@ void TagText(const char* in, char* out, size_t n) {
     out[o] = 0;
 }
 
+uint32_t g_racesArmed = 0;  // races armed in this run (RANDOM: a new hidden pick after each)
+
 void Arm(const RaceContract& c, bool host) {
+    ++g_racesArmed;
     RestoreRules(L"a new race");  // (after a failed start, before the menus' EndRace)
     ClearRace();
     g.c = c;
@@ -1061,6 +1105,8 @@ bool RosterKnown(const RaceContract& c) {
 }
 
 // ---------------------------------------------------------------- messages
+void TakeLook(const RaceLook& l);  // (On-Foot Sonic's look, by HookRacerCommit)
+
 void PushPose(const RacePose& pose) {
     PlayoutPose pp;
     memcpy(pp.pos, pose.pos, sizeof(pp.pos));
@@ -1289,6 +1335,7 @@ void HandleMessage(const RaceNetMsg& m, uint64_t lobbyHost) {
         uint8_t stage;
         if (p->index == 0 && !p->gone && DecodeGo(m.data, m.size, r, stage) && stage > g.released) {
             g.released = stage;
+            if (stage == kStageCountdown) g.goArrived = m.arrived;
             Log(false, L"race: the host released hold %u", stage);
         }
         break;
@@ -1296,6 +1343,12 @@ void HandleMessage(const RaceNetMsg& m, uint64_t lobbyHost) {
     case kMsgPose: {
         RacePose pose;
         if (!p->gone && DecodePose(m.data, m.size, pose) && pose.slot == p->index) PushPose(pose);
+        break;
+    }
+    case kMsgLook: {  // On-Foot Sonic's look of a car the sender owns (its player's; the host's AI from the host)
+        RaceLook l;
+        if (p->gone || !DecodeLook(m.data, m.size, l) || l.race != g.c.race || l.slot == g.local) break;
+        if (l.slot == p->index || (p->index == 0 && !g.host && HostCar(l.slot))) TakeLook(l);
         break;
     }
     case kMsgCars: {  // the host's cars: its player, and the AI when the host drives them
@@ -2408,8 +2461,23 @@ const uint32_t kQueryCourseAvailable = 73;
 
 void __cdecl Hook2003(void* vm, NativeCall* d) {
     Original<NativeFn>(kH2003)(vm, d);
+    if (d && d->argc == 2 && d->values[0] == kQueryCourseAvailable && d->values[1] == kRandomCourseHash) {
+        d->retValue = 1;  // the lobby's RANDOM COURSE (the stock answer for a hash it doesn't know is 0)
+        return;
+    }
     if (d && d->argc == 2 && d->values[0] == kQueryCourseAvailable && d->values[1] == kEggCourseHash) {
         if ((g_eggScanned && !g_eggHangar) || !g_eggLobby) d->retValue = 0;
+        g_courseOffered[kCourseRandom - 1] = d->retValue ? 1 : 0;  // (Egg Hangar is kCourses' last)
+        return;
+    }
+    if (d && d->argc == 2 && (d->values[0] == kQueryCourseAvailable || d->values[0] == kQueryRacerAvailable)) {
+        if (d->values[0] == kQueryCourseAvailable) {
+            for (int i = 0; i < kCourseRandom; ++i)
+                if (kCourses[i].hash == d->values[1]) g_courseOffered[i] = d->retValue ? 1 : 0;
+        } else {
+            for (int i = 0; g_racerList && i < g_racerCount && i < kRandomMaxRacers; ++i)
+                if (g_racerList[i].hash == d->values[1]) g_racerOffered[i] = d->retValue ? 1 : 0;
+        }
         return;
     }
     if (!(g.phase == kArmed && g.launched) && g.phase != kCreating) return;
@@ -2597,18 +2665,33 @@ void ClockObserve() {
         g.clockValid = true;
         if (g.phase == kRunning && !g.clockBase) {  // released before a frame start was seen: from here
             g.clockBase = true;
-            g.clockD0 = g.clockD;
+            g.clockD0 = g.clockD - g.clockLateMs;
         }
     }
     g.clockT = t;
     g.clockStep = step;
 }
 
-// At the countdown's release (every screen lined up): the dropped time from here on counts.
+// At the countdown's release (every screen lined up): the dropped time from here on counts. A guest whose game was busy
+// when the host's Go came (a long frame: race 6bd925b4, 3.96 s) starts its countdown that much later than the others, so
+// the wait counts too (clockLateMs): D at this frame's start already holds the long frame, so nothing counts twice. The
+// countdown's first step (this frame's, where Tick took the Go) stands for the frame's sim window, acc + steps ms before now.
 void ClockStart() {
+    g.clockLateMs = 0;
+    if (g.goArrived) {
+        int32_t signedWait = (int32_t)(GetTickCount() - g.goArrived);  // (signed: the stamp is | 1, so it can read 1 ms ahead)
+        uint32_t wait = signedWait > 0 ? (uint32_t)signedWait : 0;
+        if (signedWait >= -1 && wait <= kHoldBMs) {
+            double window = *(volatile float*)(uintptr_t)kStepAcc + StepMs() * *(volatile int32_t*)(uintptr_t)kFrameSteps;
+            g.clockLateMs = wait > window ? wait - window : 0;
+            if (wait >= 100) Log(false, L"race: the host's GO waited %lu ms here (this game was busy); the race clock counts it", (unsigned long)wait);
+        } else {
+            Log(true, L"race: the host's GO read %lu ms old; the race clock is left as it is", (unsigned long)wait);
+        }
+    }
     if (!g.clockValid) return;  // (ClockObserve takes the next frame start)
     g.clockBase = true;
-    g.clockD0 = g.clockD;
+    g.clockD0 = g.clockD - g.clockLateMs;
 }
 
 // A Racing / WaitingForFinishers tick, before the stock update: the race clock catches up the whole ticks dropped.
@@ -2915,24 +2998,99 @@ float DeviceValue(const uint8_t* dev, uint32_t id) {
     return channels && c >= 0 && c < 256 ? channels[c] : 0;
 }
 
-void SteerAfter(uint8_t* state, const wchar_t* what) {
-    if (!(g.c.flags & kContractNoDriftPlus) || g.phase == kIdle || g.phase == kFailed || g.local < 0 || !state) return;  // (failed: an offline race)
-    uint8_t* racer = *(uint8_t**)(state + kStateRacer);
-    uint8_t* controller = *(uint8_t**)(state + kStateController);
-    uint8_t* inputs = *(uint8_t**)(state + kStateInputs);
-    if (!racer || racer != g.racers[g.local] || !controller || !inputs) return;
+// ---------------------------------------------------------------- drift log (config.ini [Debug] DriftLog=1; read-only)
+// Majority Drift Parity research (notes\KEYBOARD-DRIFT.md §2b, open question 10): one CSV line per sim tick while this PC's human
+// car drifts (and 25 ticks after), in any race, offline too: the inputs this tick (device, stick, d-pad, the final CS steer / gas /
+// brake) and the drift fields the previous tick's physics left. Nothing is written to the game.
+std::wstring g_driftLogPath;  // empty: off
+FILE* g_driftLogFile = nullptr;
+uint8_t* g_driftLogRacer = nullptr;
+uint32_t g_driftLogTail = 0, g_driftLogLines = 0, g_driftLogLast = 0;
+
+bool DriftRead(const void* p, void* out, size_t n) {
+    __try {
+        memcpy(out, p, n);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+float DriftF(const uint8_t* base, uint32_t off) {
+    float v = -999.0f;
+    if (base) DriftRead(base + off, &v, 4);
+    return v;
+}
+uint8_t* DriftP(const uint8_t* base, uint32_t off) {
+    uint8_t* v = nullptr;
+    if (base) DriftRead(base + off, &v, 4);
+    return v;
+}
+
+void DriftLogTick(uint8_t* racer, uint8_t* controller, uint8_t* inputs, const uint8_t* dev, const wchar_t* what) {
+    if (g_driftLogPath.empty() || !racer || !inputs || g_driftLogLines > 400000) return;
+    // One car at a time (offline split screen has two humans): another car only after 5 s without lines.
+    if (racer != g_driftLogRacer && g_driftLogRacer && SimTick() - g_driftLogLast < 250) return;
+    uint8_t* veh = DriftP(racer, 0x9f4);
+    int32_t st = -1;
+    if (veh) DriftRead(veh + 0x2d0, &st, 4);
+    float brake = DriftF(inputs, 0x48);
+    bool active = st > 0 || brake > 0;
+    if (active) g_driftLogTail = 25;
+    else if (g_driftLogTail) --g_driftLogTail;
+    else return;
+    if (!g_driftLogFile) {
+        g_driftLogFile = _wfopen(g_driftLogPath.c_str(), L"a");
+        if (!g_driftLogFile) { g_driftLogPath.clear(); return; }
+        setvbuf(g_driftLogFile, nullptr, _IOFBF, 1 << 16);
+    }
+    if (racer != g_driftLogRacer) {  // a new car (race): its per-car numbers once (notes\KEYBOARD-DRIFT.md open question 2)
+        g_driftLogRacer = racer;
+        uint8_t* ta = DriftP(veh, 0x3b8);
+        uint8_t* tb = DriftP(veh, 0x3bc);
+        uint8_t* pc = DriftP(racer, 0x1f0);
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        fprintf(g_driftLogFile, "# %04d-%02d-%02d %02d:%02d:%02d car %p online=%d dev=%s tA170=%.4f tB1d0=%.4f tB1e0=%.4f tB230=%.4f tB2a0=%.4f "
+                "tB180=%.4f p6c0=%.4f p6d0=%.4f byte6ec732=%d\n",
+                t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, (void*)racer, g.phase != kIdle && g.phase != kFailed,
+                !dev ? "?" : *(const uint32_t*)dev == kKeyboardVtable ? "k" : "c", DriftF(ta, 0x170), DriftF(tb, 0x1d0), DriftF(tb, 0x1e0),
+                DriftF(tb, 0x230), DriftF(tb, 0x2a0), DriftF(tb, 0x180), DriftF(pc, 0x6c0), DriftF(pc, 0x6d0), *(volatile uint8_t*)(uintptr_t)0x6ec732);
+        fprintf(g_driftLogFile, "tick,state,dev,stick,dl,dr,steer,gas,brake,brakeT,hop,latch,yaw,angle,slip,v230,f0,f1,f2,f3,speed,boost460,what\n");
+    }
+    float stick = 0, dl = 0, dr = 0;
+    uint32_t row = controller ? *(uint32_t*)(controller + 0x20) : 99;
+    if (dev && row <= 3) {
+        const uint32_t* ids = (const uint32_t*)(uintptr_t)(kActionRows + 0x4c * row);
+        stick = DeviceValue(dev, ids[4]), dl = DeviceValue(dev, ids[15]), dr = DeviceValue(dev, ids[16]);
+    }
+    int32_t boost = 0;
+    if (veh) DriftRead(veh + 0x460, &boost, 4);
+    fprintf(g_driftLogFile, "%u,%d,%s,%.3f,%.0f,%.0f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f,%d,%ls\n", SimTick(), st,
+            !dev ? "?" : *(const uint32_t*)dev == kKeyboardVtable ? "k" : "c", stick, dl, dr, DriftF(inputs, 0x40), DriftF(inputs, 0x44), brake,
+            DriftF(veh, 0x310), DriftF(veh, 0x270), DriftF(veh, 0x2a0), DriftF(veh, 0x250), DriftF(veh, 0x210), DriftF(veh, 0x260), DriftF(veh, 0x230),
+            DriftF(racer, 0xa90), DriftF(racer, 0xa94), DriftF(racer, 0xa98), DriftF(racer, 0xa9c), DriftF(racer, 0xa60), boost & 0xff, what);
+    ++g_driftLogLines;
+    g_driftLogLast = SimTick();
+    if (!g_driftLogTail || st == 0) fflush(g_driftLogFile);
+}
+
+// The device that drives this steering state's car (CS[0] -> the input manager's list), or null.
+const uint8_t* SteerDevice(const uint8_t* inputs) {
     uint8_t* in = *(uint8_t**)(uintptr_t)kInputMgrPtr;
     uint8_t* mgr = in ? *(uint8_t**)(in + 0x14) : nullptr;
-    int32_t device = *(int32_t*)inputs;  // the racer's device index (CS[0])
-    if (!mgr || device < 0 || device >= 16 || device >= *(int32_t*)(mgr + 4)) return;
-    uint8_t* dev = *(uint8_t**)(mgr + 0xc + 4 * device);
+    int32_t device = inputs ? *(const int32_t*)inputs : -1;
+    if (!mgr || device < 0 || device >= 16 || device >= *(int32_t*)(mgr + 4)) return nullptr;
+    return *(uint8_t**)(mgr + 0xc + 4 * device);
+}
+
+// Drift+ off (kContractNoDriftPlus) on this game's controller-driven car: the stick OR the d-pad steers (steer.h).
+void DriftPlusOff(uint8_t* racer, uint8_t* controller, float* steer, const uint8_t* dev, const wchar_t* what) {
     uint32_t row = *(uint32_t*)(controller + 0x20);
-    if (!dev || *(uint32_t*)dev == kKeyboardVtable || row > 3) return;  // (a keyboard can't steer twice)
+    if (*(const uint32_t*)dev == kKeyboardVtable || row > 3) return;  // (a keyboard can't steer twice)
     const uint32_t* ids = (const uint32_t*)(uintptr_t)(kActionRows + 0x4c * row);
     float stick = DeviceValue(dev, ids[4]), left = DeviceValue(dev, ids[15]), right = DeviceValue(dev, ids[16]);
     bool flip = (*(uint32_t*)(racer + kRacerSteerFlags) >> 3) & 1;  // (0x5af150's last step: the steering reversed)
     float stock = right + (stick - left);
-    float* steer = (float*)(inputs + 0x40);
     if (fabsf(*steer - (flip ? -stock : stock)) > 1e-4f) {
         if (!g.steerSkipLogged) Log(false, L"race: Drift+ off: the %s steering (%.3f) isn't the stick + d-pad sum (%.3f); left as it is", what, *steer, stock);
         g.steerSkipLogged = true;
@@ -2946,6 +3104,40 @@ void SteerAfter(uint8_t* state, const wchar_t* what) {
             right - left, g.steerOwner == kSteerStick ? L"stick" : L"d-pad", one, *steer);
     g.steerLogged = true;
     *steer = one;
+}
+
+// Same-side drift re-press (drift_style.h): this game's keyboard-driven car, online races. The controller's update runs before the
+// car's physics in the same tick, so the drift state and side read here are the ones the previous tick left.
+void DriftSameSide(uint8_t* racer, float* steer, float brake, const uint8_t* dev) {
+    if (!g_sameSideHop || *(const uint32_t*)dev != kKeyboardVtable) return;
+    uint8_t* veh = *(uint8_t**)(racer + 0x9f4);
+    int32_t st = 0;
+    float latch = 0;
+    if (!veh || !DriftRead(veh + 0x2d0, &st, 4) || !DriftRead(veh + 0x2a0, &latch, 4)) return;
+    float v = SameSideSteer(g.sameSide, st, latch, brake, *steer);
+    if (v == *steer) return;
+    if (!g.sameSideLogged)
+        Log(false, L"race: drift re-press with the counter arrow held: steering %.2f is %.2f for this tick (the new drift keeps its side)", *steer, v);
+    g.sameSideLogged = true;
+    ++g.sameSideKept;
+    *steer = v;
+}
+
+void SteerAfter(uint8_t* state, const wchar_t* what) {
+    if (!state) return;
+    uint8_t* racer = *(uint8_t**)(state + kStateRacer);
+    uint8_t* controller = *(uint8_t**)(state + kStateController);
+    uint8_t* inputs = *(uint8_t**)(state + kStateInputs);
+    if (!racer || !controller || !inputs) return;
+    bool online = g.phase != kIdle && g.phase != kFailed && g.local >= 0;  // (failed: an offline race)
+    if (online && racer != g.racers[g.local]) return;  // (this game's own car only)
+    if (!online && g_driftLogPath.empty()) return;  // (offline: nothing, unless the drift log runs)
+    const uint8_t* dev = SteerDevice(inputs);
+    if (online && dev) {
+        if (g.c.flags & kContractNoDriftPlus) DriftPlusOff(racer, controller, (float*)(inputs + 0x40), dev, what);
+        DriftSameSide(racer, (float*)(inputs + 0x40), *(float*)(inputs + 0x48), dev);
+    }
+    if (!g_driftLogPath.empty()) DriftLogTick(racer, controller, inputs, dev, what);  // (after our changes: the numbers the physics sees)
 }
 
 void __fastcall HookSteerHuman(uint8_t* state, void*) {
@@ -3112,6 +3304,82 @@ bool StillNetworkCar(const uint8_t* racer, int k) {
     return false;
 }
 
+// ---------------------------------------------------------------- On-Foot Sonic's look (notes\ONFOOT-ONLINE.md, interface v1)
+// OnFootSonic.dll draws every car that is him running on foot; a network car has no boost / drift / steer state of its own, so
+// its owner's game reads the car's look (OnFootNetLookRead) and sends it (wire Look), and the other games hand the latest one
+// back (OnFootNetLookApply) every tick before the car's end-of-tick commit. Opaque here. No OnFootSonic.dll: nothing is sent.
+typedef int(__cdecl* OnFootLookReadFn)(const void* racer, unsigned char* out, int cap);
+typedef int(__cdecl* OnFootLookApplyFn)(const void* racer, const unsigned char* in, int n);
+OnFootLookReadFn g_lookRead = nullptr;
+OnFootLookApplyFn g_lookApply = nullptr;
+constexpr uint32_t kLookEvery = 2;  // sim ticks between one car's looks (25 a second)
+
+void ResolveLook() {
+    if (g.lookResolved) return;
+    g.lookResolved = true;
+#ifndef RACE_TEST
+    HMODULE m = GetModuleHandleW(L"OnFootSonic.dll");
+    g_lookRead = m ? (OnFootLookReadFn)GetProcAddress(m, "OnFootNetLookRead") : nullptr;
+    g_lookApply = m ? (OnFootLookApplyFn)GetProcAddress(m, "OnFootNetLookApply") : nullptr;
+    if (m) Log(false, L"race: On-Foot Sonic's look %s", g_lookRead && g_lookApply ? L"is shared (OnFootSonic.dll has both exports)"
+                                                                               : L"isn't shared (this OnFootSonic.dll predates it)");
+#endif
+}
+
+// Owner: car k (this game's player's, or the host's AI) after its commit.
+void SendLook(const uint8_t* racer, int k) {
+    ResolveLook();
+    if (!g_lookRead || k < 0 || k >= kGridSlots) return;
+    uint32_t tick = SimTick();
+    if (g.lookSent[k] && tick - g.lookSent[k] < kLookEvery) return;
+    RaceLook l = {};
+    int n = 0;
+    __try {
+        n = g_lookRead(racer, l.data, wire::kLookMax);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_lookRead = nullptr;
+        Log(true, L"race: OnFootSonic.dll faulted reading a look; On-Foot Sonic's look isn't sent any more this race");
+        return;
+    }
+    if (n <= 0 || n > wire::kLookMax) return;
+    l.race = g.c.race;
+    l.slot = (uint8_t)k;
+    l.len = (uint8_t)n;
+    l.tick = tick;
+    uint8_t b[kWireMax];
+    size_t bytes = EncodeLook(l, b, sizeof(b));
+    if (bytes && RaceNetSend(0, b, bytes, false)) {
+        g.lookSent[k] = tick | 1;
+        if (++g.looksOut == 1) Log(false, L"race: car %d's On-Foot look is sent (%d bytes)", k, n);
+    }
+}
+
+// A network car's owner sent its look: kept until a newer one (by the owner's tick).
+void TakeLook(const RaceLook& l) {
+    int k = l.slot;
+    if (g.lookLen[k] && (int32_t)(l.tick - g.lookTick[k]) <= 0) return;
+    memcpy(g.look[k], l.data, sizeof(g.look[k]));
+    g.lookLen[k] = l.len;
+    g.lookTick[k] = l.tick;
+    if (++g.looksIn == 1) Log(false, L"race: car %d's On-Foot look arrived (%u bytes)", k, (unsigned)l.len);
+}
+
+// Receiver: before network car k's commit.
+void ApplyLook(const uint8_t* racer, int k) {
+    if (!g.lookLen[k]) return;
+    ResolveLook();
+    if (!g_lookApply) return;
+    int used = 0;
+    __try {
+        used = g_lookApply(racer, g.look[k], g.lookLen[k]);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_lookApply = nullptr;
+        Log(true, L"race: OnFootSonic.dll faulted applying a look; On-Foot Sonic's look isn't shown any more this race");
+        return;
+    }
+    if (used && ++g.looksApplied == 1) Log(false, L"race: car %d shows its owner's On-Foot look", k);
+}
+
 void __fastcall HookRacerCommit(void* self, void*, int views, void* viewList) {
     bool racePhase = g.phase == kHoldB || g.phase == kRunning;
     if (racePhase && g.host) {
@@ -3128,6 +3396,7 @@ void __fastcall HookRacerCommit(void* self, void*, int views, void* viewList) {
             WritePose((uint8_t*)self, pose);
             ApplyNav((uint8_t*)self, pose.nav, k);  // snaps the cursor to the position just written
             NoteFx(k, pose.fx);
+            ApplyLook((const uint8_t*)self, k);  // (On-Foot Sonic: his owner's boost / drift / steer for his run)
         } else {
             NoteFx(k, kFxNone);  // its owner went quiet: the game's own (still) exhaust
         }
@@ -3139,8 +3408,10 @@ void __fastcall HookRacerCommit(void* self, void*, int views, void* viewList) {
     if (k == g.local) {
         if (hostCars) AddToBatch((const uint8_t*)self, k);
         else SendPose((const uint8_t*)self);
-    } else if (hostCars && HostCar(k) && SimTick() % kAiPoseEvery == 0) {
-        AddToBatch((const uint8_t*)self, k);
+        SendLook((const uint8_t*)self, k);
+    } else if (hostCars && HostCar(k)) {
+        if (SimTick() % kAiPoseEvery == 0) AddToBatch((const uint8_t*)self, k);
+        SendLook((const uint8_t*)self, k);
     }
 }
 
@@ -4500,6 +4771,52 @@ void RaceCancel(AbortReason why) {
     EndRace(L"cancelled in the menus");
 }
 
+// RANDOM: this game's hidden pick for its player (natives.cpp, every lobby frame). random: the player is on RANDOM. Returns the
+// pick (-1 none) and whether it is a duplicate. A new pick when RANDOM is chosen, after every race this game armed, and whenever
+// the pick collides (random_slots.h: a fixed pick or an earlier seat's RANDOM pick wins).
+int32_t RaceRandomPick(const LobbySnapshot& s, bool random, bool& dup) {
+    static int32_t s_pick = -1;
+    static bool s_dup = false;
+    static uint32_t s_armed = 0;
+    static std::mt19937 s_rng(std::random_device{}() ^ GetTickCount());
+    dup = false;
+    if (!random || !g_racerList) {
+        s_pick = -1;
+        return -1;
+    }
+    int n = s.state == kLobbyInLobby ? (s.memberCount < kMaxMembers ? s.memberCount : kMaxMembers) : 0, me = -1;
+    for (int i = 0; i < n; ++i)
+        if (s.members[i].isMe) me = i;
+    if (me < 0) {  // (not in a lobby: keep it)
+        dup = s_dup;
+        return s_pick;
+    }
+    bool offered[kRandomMaxRacers] = {};
+    int count = g_racerCount < kRandomMaxRacers ? g_racerCount : kRandomMaxRacers;
+    int asked = 0;  // (no 2003(72) answer recorded at all: every racer RacerOn and RacerOnline allow, as the course roll does)
+    for (int i = 0; i < count; ++i) asked += g_racerOffered[i] >= 0;
+    static int s_askedLogged = -1;
+    if (s_askedLogged != asked) {
+        s_askedLogged = asked;
+        Log(false, L"lobby: RANDOM: the racer list's answers recorded for %d of %d racers%s", asked, count,
+            asked ? L"" : L" (none: every racer this game allows online is in the pool)");
+    }
+    for (int i = 0; i < count; ++i) offered[i] = (!asked || g_racerOffered[i] == 1) && RacerOn(i) && RacerOnline(i);
+    if (s_pick < 0 || s_armed != g_racesArmed || !RandomPickValid(s.members, n, me, s_pick, s_dup, offered, count)) {
+        int32_t old = s_pick;
+        s_pick = RandomRoll(s.members, n, me, offered, count, s_rng(), s_dup);
+        s_armed = g_racesArmed;
+        static bool s_noneLogged = false;
+        bool say = s_pick != old || (s_pick < 0 && !s_noneLogged);  // (a pool that stays empty logs once, not every frame)
+        s_noneLogged = s_pick < 0;
+        if (say)
+            Log(false, L"lobby: RANDOM: this player's next racer is %S%s", s_pick >= 0 ? g_racerList[s_pick].name : "(none: this game offers no racer)",
+                s_dup ? L" (every racer offered here is taken: a duplicate)" : L"");
+    }
+    dup = s_dup;
+    return s_pick;
+}
+
 int32_t RaceHostStart() {
     LobbySnapshot s;
     LobbyRead(s);
@@ -4508,10 +4825,9 @@ int32_t RaceHostStart() {
     if (g.phase != kIdle) return kStartBusy;
     if (!g_racerList) return kStartNoList;
     const LobbyRules& r = s.rules;
-    if (!CourseUsable(r.course) || r.laps < 1 || r.laps > 9) return kStartNoRules;
+    if ((r.course != kCourseRandom && !CourseUsable(r.course)) || r.laps < 1 || r.laps > 9) return kStartNoRules;
     RaceContract c = {};
     c.course = (uint8_t)r.course;
-    c.courseHash = kCourses[r.course].hash;
     c.laps = (uint8_t)r.laps;
     c.items = (uint8_t)(r.items ? 1 : 0);
     c.catchup = (uint8_t)(r.catchup ? 1 : 0);
@@ -4521,15 +4837,19 @@ int32_t RaceHostStart() {
     if (RaceDriftPlusOff(s)) c.flags |= kContractNoDriftPlus;
     c.humanCount = (uint8_t)s.memberCount;
     bool used[64] = {};
-    for (int i = 0; i < s.memberCount; ++i) {  // members are host first (steam_mp.cpp)
+    int n = s.memberCount < kMaxMembers ? s.memberCount : kMaxMembers;
+    for (int i = 0; i < n; ++i) {  // members are host first (steam_mp.cpp)
         const LobbyMember& m = s.members[i];
-        if (m.racer < 0 || m.racer >= g_racerCount || !m.ready) return kStartNotReady;
+        if (m.racer < 0 || (m.racer >= g_racerCount && m.racer != kRacerRandom) || !m.ready) return kStartNotReady;
+        // RANDOM: the hidden pick that player's own game rolled (random_slots.h); not settled yet (an update in flight): wait.
+        int32_t racer = RandomHostRacer(s.members, n, i, g_racerCount);
+        if (racer < 0) return kStartRandomPending;
         // Players may share a racer (the user's choice, 2026-10-23, after an 8-Sonic race worked): cars are made per grid slot.
-        if (!strcmp(g_racerList[m.racer].name, "mii") || !strcmp(g_racerList[m.racer].name, "avatar")) return kStartRacerNotOnline;
-        if (!RacerOn(m.racer)) return kStartRacerOff;  // (picked before the lobby turned its mod off: the picker hides it now)
-        used[m.racer] = true;
+        if (!RacerOnline(racer)) return kStartRacerNotOnline;
+        if (!RacerOn(racer)) return kStartRacerOff;  // (picked before the lobby turned its mod off: the picker hides it now)
+        used[racer] = true;
         c.humans[i] = m.id;
-        c.roster[i] = g_racerList[m.racer].hash;
+        c.roster[i] = g_racerList[racer].hash;
     }
     for (int i = 0; i < s.memberCount; ++i)  // every game can make race connections, or the contract can't reach it
         if (!s.members[i].net) return kStartNetNotReady;
@@ -4541,6 +4861,19 @@ int32_t RaceHostStart() {
     std::mt19937 rng(rd() ^ GetTickCount());
     do c.race = rng(); while (!c.race);
     c.seed = rng();
+    if (r.course == kCourseRandom) {  // RANDOM COURSE: the host's game rolls it now, from the courses its own list offers
+        int courses[kCourseRandom], count = 0, asked = 0;
+        for (int i = 0; i < kCourseRandom; ++i) asked += g_courseOffered[i] >= 0;
+        for (int i = 0; i < kCourseRandom; ++i)
+            if (CourseUsable(i) && (!asked || g_courseOffered[i] == 1)) courses[count++] = i;
+        if (!count) return kStartNoRules;
+        c.course = (uint8_t)courses[rng() % (uint32_t)count];
+        Log(false, L"host Start: RANDOM COURSE rolled %S (one of %d)", kCourses[c.course].name, count);
+    }
+    c.courseHash = kCourses[c.course].hash;
+    for (int i = 0; i < n; ++i)
+        if (s.members[i].racer == kRacerRandom)
+            Log(false, L"host Start: player %d races its RANDOM pick (%S)", i + 1, g_racerList[s.members[i].random].name);
     int pool[64], poolCount = 0;  // AI: every other racer that can be an AI, shuffled
     for (int i = 0; i < g_racerCount; ++i)
         if (!used[i] && g_racerList[i].ai && RacerOn(i)) pool[poolCount++] = i;
@@ -4548,8 +4881,8 @@ int32_t RaceHostStart() {
     if (poolCount < kGridSlots - c.humanCount) return kStartNoList;
     for (int k = c.humanCount, j = 0; k < kGridSlots; ++k, ++j) c.roster[k] = g_racerList[pool[j]].hash;
     uint8_t b[kWireMax];
-    size_t n = EncodeContract(c, b, sizeof(b));
-    if (!n || !RaceNetSend(0, b, n, true)) return kStartSendFailed;
+    size_t bytes = EncodeContract(c, b, sizeof(b));
+    if (!bytes || !RaceNetSend(0, b, bytes, true)) return kStartSendFailed;
     Arm(c, true);
     return kStartOk;
 }
@@ -4568,6 +4901,14 @@ void RaceConfigure(const wchar_t* configIni) {
     if (g_hostAiConfig && !g_itemsConfig) Log(false, L"online races: as host, each game shows only its own player's items (config.ini [Race] ItemSync=0)");
     g_forceDriftPlusOff = GetPrivateProfileIntW(L"Debug", L"ForceDriftPlusOff", 0, configIni) != 0;
     if (g_forceDriftPlusOff) Log(false, L"online races: as host, Drift+ is off in every race (config.ini [Debug] ForceDriftPlusOff=1)");
+    if (GetPrivateProfileIntW(L"Debug", L"DriftLog", 0, configIni) != 0) {
+        g_driftLogPath = configIni;
+        size_t slash = g_driftLogPath.find_last_of(L"\\/");
+        g_driftLogPath = (slash == std::wstring::npos ? std::wstring() : g_driftLogPath.substr(0, slash + 1)) + L"drift-log.csv";
+        Log(false, L"debugging: drifts are logged to drift-log.csv (config.ini [Debug] DriftLog=1; read-only)");
+    }
+    g_sameSideHop = GetPrivateProfileIntW(L"Debug", L"SameSideHop", 0, configIni) != 0;
+    if (g_sameSideHop) Log(false, L"online races: the keyboard drift re-press fix is ON (config.ini [Debug] SameSideHop=1)");
     g_debugStallMs = GetPrivateProfileIntW(L"Debug", L"StallMs", 0, configIni);
     if (g_debugStallMs > 30000) g_debugStallMs = 30000;
     if (g_debugStallMs) Log(true, L"debugging: this game freezes for %u ms 10 s into each online race (config.ini [Debug] StallMs)", g_debugStallMs);
@@ -4579,20 +4920,25 @@ void RaceUseEggHangar(bool installed) {
     Log(false, L"online races: Egg Hangar's course is %s", installed ? L"offered (the Egg Hangar mod is installed)" : L"not offered (no Egg Hangar mod)");
 }
 
-void RaceLobbyMods(bool eggOn, bool metalOn) {
-    if (eggOn == g_eggLobby && metalOn == g_metalLobby) return;
+void RaceLobbyMods(bool eggOn, bool metalOn, bool onFootOn) {
+    if (eggOn == g_eggLobby && metalOn == g_metalLobby && onFootOn == g_onFootLobby) return;
     g_eggLobby = eggOn;
     g_metalLobby = metalOn;
-    Log(false, L"this lobby's modifications: Egg Hangar %s, Metal Sonic %s (off = not used here, or not installed)", eggOn ? L"on" : L"off",
-        metalOn ? L"on" : L"off");
+    g_onFootLobby = onFootOn;
+    Log(false, L"this lobby's modifications: Egg Hangar %s, Metal Sonic %s, On-Foot Sonic %s (off = not used here, or not installed)",
+        eggOn ? L"on" : L"off", metalOn ? L"on" : L"off", onFootOn ? L"on" : L"off");
 }
 
 // The lobby's racer list: chosen by which menu module was installed (Roster Pack 25, stock 21, or stock 21 + Metal Sonic 1.1.2).
 void RaceUseRacerList(RacerListKind kind) {
-    g_racerList = kind == kRacerListRoster ? kRacersRoster : kind == kRacerListMetal ? kRacersMetal : kRacersStock;
-    g_racerCount = kind == kRacerListRoster ? (int)(sizeof(kRacersRoster) / sizeof(kRacersRoster[0]))
-                   : kind == kRacerListMetal ? (int)(sizeof(kRacersMetal) / sizeof(kRacersMetal[0]))
-                                             : (int)(sizeof(kRacersStock) / sizeof(kRacersStock[0]));
+    g_racerList = kind == kRacerListRoster         ? kRacersRoster
+                  : kind == kRacerListMetal        ? kRacersMetal
+                  : kind == kRacerListMetalOnFoot  ? kRacersMetalOnFoot
+                                                   : kRacersStock;
+    g_racerCount = kind == kRacerListRoster          ? (int)(sizeof(kRacersRoster) / sizeof(kRacersRoster[0]))
+                   : kind == kRacerListMetal         ? (int)(sizeof(kRacersMetal) / sizeof(kRacersMetal[0]))
+                   : kind == kRacerListMetalOnFoot   ? (int)(sizeof(kRacersMetalOnFoot) / sizeof(kRacersMetalOnFoot[0]))
+                                                     : (int)(sizeof(kRacersStock) / sizeof(kRacersStock[0]));
 }
 
 // The other players' name tags (M6, re\m6-race-hud\FINDINGS.md (b)). The console's online tags are gone
@@ -6473,6 +6819,7 @@ int32_t RaceProfileNative(int32_t field, int32_t up, int32_t down, int32_t f1) {
 }
 
 uint32_t RaceRacerHash(int index) { return g_racerList && index >= 0 && index < g_racerCount ? g_racerList[index].hash : 0; }
+int RaceRacerCount() { return g_racerList ? g_racerCount : 0; }
 bool RaceRacerOn(int index) { return RacerOn(index); }
 int RaceTestPlayerRacer(int n, const int* taken, int takenCount) {
     for (int i = 0; g_racerList && i < g_racerCount; ++i) {

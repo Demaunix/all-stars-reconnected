@@ -121,16 +121,94 @@ int main(int argc, char** argv) {
     CHECK(ModsDifferBeyondIcons(mineIcons, hostAll));   // another mod's build differs too
 
     // The join refusal pop-up: the code, then the body it picks (steam.py MODS_REFUSALS: Egg's mark, Metal's, then the others).
-    CHECK(RefusedMods(mineIcons, hostAll) == (kModOtherVersion | kModMissing << 2 | 16));
+    const int32_t kRest = kRefusedOtherMods;
+    CHECK(RefusedMods(mineIcons, hostAll) == (kModOtherVersion | kModMissing << 2 | kRest));
     mineIcons[0].runtime = runtime0;
     CHECK(RefusedMods(mineIcons, hostAll) == (kModOtherVersion | kModMissing << 2));
-    CHECK(RefusalText(0) == 0 && RefusalText(kModSame | kModSame << 2) == 0 && RefusalText(16) == 0);  // nothing to name: the plain text
-    CHECK(RefusalText(kModMissing << 2) == 3);                    // Metal not installed
-    CHECK(RefusalText(kModOtherVersion << 2 | 16) == 2);           // Metal another version, other mods too
-    CHECK(RefusalText(kModOtherVersion) == 5);                      // Egg another version
-    CHECK(RefusalText(kModOtherVersion | kModMissing << 2) == 9);   // Egg another version, Metal not installed
-    CHECK(RefusalText(kModMissing | kModSame << 2) == 11);          // Egg not installed (Metal the same build)
-    CHECK(RefusalText(kModMissing | kModMissing << 2 | 16) == 16);  // the last text
+    // (steam.py's order: Egg's mark, then Metal's, then On-Foot's, each none / dash / X, each without and with the other mods)
+    CHECK(RefusalText(0) == 0 && RefusalText(kModSame | kModSame << 2 | kModSame << 4) == 0 && RefusalText(kRest) == 0);  // the plain text
+    CHECK(RefusalText(kModOtherVersion << 4) == 1);                  // On-Foot another version
+    CHECK(RefusalText(kModMissing << 4) == 3);                       // On-Foot not installed
+    CHECK(RefusalText(kModMissing << 2) == 11);                      // Metal not installed
+    CHECK(RefusalText(kModOtherVersion << 2 | kRest) == 6);           // Metal another version, other mods too
+    CHECK(RefusalText(kModOtherVersion) == 17);                       // Egg another version
+    CHECK(RefusalText(kModOtherVersion | kModMissing << 2) == 29);    // Egg another version, Metal not installed
+    CHECK(RefusalText(kModMissing | kModSame << 2) == 35);            // Egg not installed (Metal the same build)
+    CHECK(RefusalText(kModMissing | kModMissing << 2 | kModMissing << 4 | kRest) == kRefusalTexts);  // the last text
+    for (int32_t code = 0; code < 128; ++code) CHECK(RefusalText(code) >= 0 && RefusalText(code) <= kRefusalTexts);
+
+    // On-Foot Sonic (notes\ONFOOT-ONLINE.md): one switch with his add-on; his icon is the worse of the two.
+    std::vector<ModEntry> hostFoot = mine;
+    hostFoot.push_back({kOnFootId, "?", H1, H2});
+    hostFoot.push_back({kOnFootAddonId, "1.0.1", H2, H1});
+    std::vector<ModEntry> reqFoot = RequiredMods(hostFoot, {kOnFootId, kOnFootAddonId});
+    CHECK(reqFoot.size() == mine.size() && DescribeModDifferences(mine, reqFoot).empty());  // off: anyone joins
+    CHECK(DescribeModDifferences(hostFoot, RequiredMods(mine, {})).empty());               // a joiner with him, a host without
+    CHECK(OnFootStateFor(mine, reqFoot) == kModUnused && ModIcons(hostFoot, reqFoot) == 0);
+    reqFoot = RequiredMods(hostFoot, {});
+    CHECK(DescribeModDifferences(mine, reqFoot).size() == 2);  // on: both missing
+    CHECK(OnFootStateFor(mine, reqFoot) == kModMissing && OnFootStateFor(hostFoot, reqFoot) == kModSame);
+    std::vector<ModEntry> noAddon(hostFoot.begin(), hostFoot.end() - 1);
+    CHECK(OnFootStateFor(noAddon, reqFoot) == kModMissing);    // him without his add-on
+    std::vector<ModEntry> oldAddon = hostFoot;
+    oldAddon.back().version = "1.0.0";
+    CHECK(OnFootStateFor(oldAddon, reqFoot) == kModOtherVersion && ModIcons(oldAddon, reqFoot) == kModOtherVersion << 4);
+    CHECK(RefusalText(RefusedMods(mine, reqFoot)) == 3);
+    // His add-on inside his folder (a `merged` build, 2026-11-10): complete alone; an unknown build still needs the add-on.
+    CHECK(OnFootComplete(hostFoot) && !OnFootComplete(noAddon) && !OnFootComplete(mine));
+    const OnFootBuildPair& mergedPair = kOnFootBuilds[sizeof(kOnFootBuilds) / sizeof(kOnFootBuilds[0]) - 1];
+    CHECK(mergedPair.merged && !kOnFootBuilds[0].merged && !kOnFootBuilds[1].merged);
+    std::vector<ModEntry> hostMerged = mine;
+    hostMerged.push_back({kOnFootId, "?", H1, mergedPair.same});
+    CHECK(OnFootComplete(hostMerged) && OnFootMergedRuntime(mergedPair.same) && !OnFootMergedRuntime(kOnFootBuilds[1].same));
+    std::vector<ModEntry> reqMerged = RequiredMods(hostMerged, {});
+    CHECK(OnFootStateFor(hostMerged, reqMerged) == kModSame && OnFootStateFor(mine, reqMerged) == kModMissing);
+    CHECK(OnFootStateFor(hostFoot, reqMerged) == kModOtherVersion);  // an old two-folder copy joining a merged host: refused
+    CHECK(!DescribeModDifferences(hostFoot, reqMerged).empty() && DescribeModDifferences(hostMerged, reqMerged).empty());
+    CHECK(OnFootStateFor(hostMerged, RequiredMods(hostMerged, {kOnFootId, kOnFootAddonId})) == kModUnused);
+
+    // His tester copies: the 16 stamp bytes after the marker don't count; the tester build counts as the public build.
+    {
+        std::vector<unsigned char> dll(4096, 0x5a), dll2;
+        memcpy(dll.data() + 1000, kOnFootStampMarker, 16);
+        for (int i = 0; i < 16; ++i) dll[1016 + i] = (unsigned char)(i * 7 + 1);  // tester A's stamp
+        dll2 = dll;
+        for (int i = 0; i < 16; ++i) dll2[1016 + i] = (unsigned char)(i * 3 + 9);  // tester B's stamp
+        std::string pinA, pinB, zeroed;
+        CHECK(Sha256Bytes(dll.data(), dll.size(), pinA) && Sha256Bytes(dll2.data(), dll2.size(), pinB) && pinA != pinB);
+        std::string a = OnFootLobbyRuntime(dll, pinA), b = OnFootLobbyRuntime(dll2, pinB);
+        std::vector<unsigned char> blank = dll;
+        memset(blank.data() + 1016, 0, 16);
+        CHECK(Sha256Bytes(blank.data(), blank.size(), zeroed));
+        CHECK(a == b && a == zeroed && a != pinA);
+        CHECK(OnFootLobbyRuntime(dll, pinB) == pinB);  // a file that isn't the pinned one: its pin, which no copy matches
+        dll[2000] ^= 1;                                // a change outside the stamp: another build
+        std::string pinC;
+        CHECK(Sha256Bytes(dll.data(), dll.size(), pinC) && OnFootLobbyRuntime(dll, pinC) != a);
+        std::vector<unsigned char> twice = dll2;       // two markers: not a tester copy we know, the plain hash
+        memcpy(twice.data() + 3000, kOnFootStampMarker, 16);
+        std::string pinT;
+        CHECK(Sha256Bytes(twice.data(), twice.size(), pinT) && OnFootLobbyRuntime(twice, pinT) == pinT);
+        std::vector<unsigned char> plainDll(4096, 0x33);  // no marker (the public build): the plain hash
+        std::string pinP;
+        CHECK(Sha256Bytes(plainDll.data(), plainDll.size(), pinP) && OnFootLobbyRuntime(plainDll, pinP) == pinP);
+        // Read through ScanMods: two folders with different stamps list the same runtime.
+        std::wstring modsFoot = root + L"\\mods-foot";
+        CreateDirectoryW(modsFoot.c_str(), nullptr);
+        CreateDirectoryW((modsFoot + L"\\On-Foot Sonic").c_str(), nullptr);
+        CreateDirectoryW((modsFoot + L"\\On-Foot Sonic\\runtime").c_str(), nullptr);
+        HANDLE f = CreateFileW((modsFoot + L"\\On-Foot Sonic\\runtime\\OnFootSonic.dll").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+        DWORD wrote = 0;
+        CHECK(f != INVALID_HANDLE_VALUE && WriteFile(f, dll2.data(), (DWORD)dll2.size(), &wrote, nullptr) && wrote == dll2.size());
+        CloseHandle(f);
+        WriteIni(modsFoot + L"\\On-Foot Sonic", "; (c) a comment line first, as a tester copy's\r\n[mod]\r\nid=on-foot-sonic\r\nruntime=runtime\\OnFootSonic.dll\r\nplan_sha256=" +
+                                                 std::string(H1) + "\r\nruntime_sha256=" + pinB + "\r\n");
+        std::vector<ModEntry> scanned;
+        std::wstring badFoot;
+        CHECK(ScanMods(modsFoot, scanned, badFoot) && scanned.size() == 1 && scanned[0].runtime == a && scanned[0].version == "?");
+    }
+    // The real pair: a tester template (stamp zeroed) lists as the public build.
+    CHECK(std::string(kOnFootBuilds[0].tester).size() == 64 && std::string(kOnFootBuilds[0].same).size() == 64);
 
     // Malformed lobby data is rejected, never half-read.
     CHECK(!DecodeMods("", back));

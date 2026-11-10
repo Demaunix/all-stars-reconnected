@@ -247,6 +247,31 @@ static void TestSmall() {
     v.wait = 0;
     v.slot = kMaxHumans;
     CHECK(EncodeVoice(v, buf, sizeof(buf)) == 0);
+    // Look (notes\ONFOOT-ONLINE.md): an opaque blob of 1..24 bytes for one car, padded with zeros.
+    {
+        RaceLook a = {21, 3, 5, 777, {1, 2, 3, 4, 5}}, b = {};
+        n = EncodeLook(a, buf, sizeof(buf));
+        CHECK(n == wire::kLookSize && DecodeLook(buf, n, b) && b.race == 21 && b.slot == 3 && b.len == 5 && b.tick == 777 &&
+              memcmp(a.data, b.data, sizeof(a.data)) == 0);
+        for (size_t k = 0; k < n; ++k) CHECK(!DecodeLook(buf, k, b));
+        RaceLook bad = a;
+        bad.len = 0;
+        CHECK(EncodeLook(bad, buf, sizeof(buf)) == 0);
+        bad.len = wire::kLookMax + 1;
+        CHECK(EncodeLook(bad, buf, sizeof(buf)) == 0);
+        bad = a;
+        bad.data[10] = 9;  // a byte past its length
+        CHECK(EncodeLook(bad, buf, sizeof(buf)) == 0);
+        bad = a;
+        bad.slot = kGridSlots;
+        CHECK(EncodeLook(bad, buf, sizeof(buf)) == 0);
+        a.len = wire::kLookMax;
+        for (int i = 0; i < wire::kLookMax; ++i) a.data[i] = (uint8_t)(i + 1);
+        n = EncodeLook(a, buf, sizeof(buf));
+        CHECK(n == wire::kLookSize && DecodeLook(buf, n, b) && b.len == wire::kLookMax && b.data[23] == 24);
+        buf[wire::kHeader + 1] = 0;  // len 0 on the wire
+        CHECK(!DecodeLook(buf, n, b));
+    }
     // ItemLine: a hit the sender's own game saw: its car spins (1) / stopped (0); an All-Star's touch names the All-Star user's
     // car (never its own).
     RaceItemLine l = {13, kLineHit, 2, 1}, m = {};
@@ -582,6 +607,14 @@ static void TestEvent() {
     c.flags = kContractHostAi | kContractItems;
     CHECK(EncodeContract(c, buf, sizeof(buf)) != 0);
     c.flags = kContractItems;
+    CHECK(EncodeContract(c, buf, sizeof(buf)) == 0);
+    // Majority Drift Parity: one drift style or none, never both.
+    RaceContract dc = {};
+    c.flags = kContractHostAi | kContractDriftKeyboard;
+    CHECK(DecodeContract(buf, EncodeContract(c, buf, sizeof(buf)), dc) && dc.flags == c.flags);
+    c.flags = kContractDriftController;
+    CHECK(DecodeContract(buf, EncodeContract(c, buf, sizeof(buf)), dc) && dc.flags == c.flags);
+    c.flags = kContractDriftKeyboard | kContractDriftController;
     CHECK(EncodeContract(c, buf, sizeof(buf)) == 0);
 }
 

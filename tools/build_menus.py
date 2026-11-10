@@ -48,6 +48,12 @@ ROSTER_ORDER = [0, 6, 8, 7, 10, 9, 11, 17, 19, 20, 18, 16, 15, 12, 13, 21, 22, 2
 # 2026-10-24: the stock order then 21).
 METAL_ROWS = [("METAL SONIC", "mechasonic")]
 METAL_ORDER = netmenu.STOCK_ORDER + [21]
+# On-Foot Sonic (the user's mod with his add-on; notes\ONFOOT-ONLINE.md, an addition): the standalone Metal Sonic's 22 and him
+# (draft 22), last in the picker. His network-table row: identity, lobby portrait, popup portrait, name key (the art interface's
+# names, tools\onfoot_art) and Sonic's race icon (his add-on's HUD borrows it too).
+ONFOOT_ROWS = [("ON-FOOT SONIC", "onfootsonic")]
+ONFOOT_ORDER = METAL_ORDER + [22]
+ONFOOT_ROW_HASHES = (0xFECC613A, 0xD683210F, 0x9F959B4E, 0x3048CE9C, 0x267FA803)
 METAL_SBN = Path(__file__).resolve().parent.parent / "reference" / "metal-sonic-1.1.2" / "FrontEndScripts.sbn"
 METAL_CHARSEL_LIST = 0x25c5
 ROSTER_SBN = r"A:\SteamLibrary\steamapps\common\Sonic and SEGA All Stars Racing\mods\All-Stars Roster Pack\payloads\Scripts\FrontEndScripts.sbn"
@@ -274,17 +280,36 @@ def main():
     assert built_metal[end + ROW_LEN:end + ROW_LEN + 7] == STOCK_CLOSE
     struct.pack_into("<I", built_metal, end + ROW_LEN + 3, 44)
     smos_reloc.validate(bytes(built_metal))
+    # Metal + On-Foot Sonic: Metal's variant with his row after Metal's (Metal's row's bytes, his five hashes) and the count 2 x 23.
+    # (His add-on leaves fe_network_game alone: src\script_subst.cpp picks this one when he and his add-on are installed.)
+    assert name_hash(ONFOOT_ROWS[0][1]) == ONFOOT_ROW_HASHES[0]
+    onfoot_row = bytearray(metal_row)
+    for k, h in enumerate(ONFOOT_ROW_HASHES):
+        assert onfoot_row[5 * k] == 0x02
+        struct.pack_into("<I", onfoot_row, 5 * k + 1, h)
+    onfoot = metal + ONFOOT_ROWS
+    net_onfoot = netmenu.build(stock, onfoot, ONFOOT_ORDER, online=True)
+    assert net_onfoot[end:end + 7] == STOCK_CLOSE
+    built_onfoot, _ = smos_reloc.insert(net_onfoot, {end: metal_row + bytes(onfoot_row)})
+    built_onfoot = bytearray(built_onfoot)
+    assert built_onfoot[end + 2 * ROW_LEN:end + 2 * ROW_LEN + 7] == STOCK_CLOSE
+    struct.pack_into("<I", built_onfoot, end + 2 * ROW_LEN + 3, 46)
+    smos_reloc.validate(bytes(built_onfoot))
     outputs = {
         "fe_network_game": bytes(built),
         "fe_network_game_stock": net_stock,
         "fe_network_game_metal": bytes(built_metal),
+        "fe_network_game_onfoot": bytes(built_onfoot),
         "fe_mainmenu": mainmenu_with_steam_join(load(base, "preview5-fe_mainmenu.smosbin")),
         "dialogs": dialogs_with_mute(dialogs_with_session_messages(load(base, "preview5-dialogs.smosbin"))),
         "results": results_with_profile(load(base, "stock-results.smosbin")),
     }
     egg = struct.pack("<I", netmenu.settings.EGG_COURSE)
-    for name in ("fe_network_game", "fe_network_game_stock", "fe_network_game_metal"):  # Egg Hangar is the online lobby's 25th course
-        assert outputs[name].count(b"\x02" + egg + bytes.fromhex("22080019000000271200")) == 1, name
+    for name in ("fe_network_game", "fe_network_game_stock", "fe_network_game_metal", "fe_network_game_onfoot"):  # Egg Hangar is the online lobby's 25th course
+        # (then RANDOM COURSE, the 26th: not a real course; the host's Start rolls one, src/race.cpp kCourseRandom)
+        rnd = struct.pack("<I", netmenu.settings.RANDOM_COURSE)
+        assert outputs[name].count(b"\x02" + egg + b"\x02" + rnd + bytes.fromhex("2208001a000000271200")) == 1, name
+        assert outputs[name].count(b"\x02" + rnd + b"\x02" + struct.pack("<I", netmenu.settings.RANDOM_ART)) == 1, name
         assert outputs[name].count(b"\x02" + egg + b"\x02" + struct.pack("<II", netmenu.settings.EGG_ART, 0)[:4]) == 1, name
     for name, data in outputs.items():
         smos_reloc.validate(data)
@@ -292,7 +317,7 @@ def main():
         print(f"{hashlib.sha256(data).hexdigest()} {name}.smosbin {len(data)} bytes")
     print(f"fe_network_game: +{info['inserted_bytes']} bytes of racer rows, {len(info['relative_fixes'])} relative fixes")
     write_embed(root / "build" / "menus_embed.h", outputs)
-    write_race_tables(root / "build" / "race_tables.h", roster, metal)
+    write_race_tables(root / "build" / "race_tables.h", roster, metal, onfoot)
 
 
 # The console's session messages (M7, re\m7-messages\FINDINGS.md Q1): the dialogs module's definitions are typed
@@ -408,17 +433,19 @@ COURSE_TABLE_AT = 0x8a9  # file offset in stock-fe_network_game.smosbin (24 push
 NO_AI = {"mii", "avatar", "ryoforklift"}
 
 
-def write_race_tables(path, roster, metal):
+def write_race_tables(path, roster, metal, onfoot):
     """C header for src/race.cpp: lobby racer index -> character hash (both menu variants), courses."""
     stock = load(Path(__file__).resolve().parent.parent / "menus" / "base", "stock-fe_network_game.smosbin")
     table = [struct.unpack_from("<I", stock, COURSE_TABLE_AT + 5 * i + 1)[0] for i in range(STOCK_COURSES)]
     assert all(stock[COURSE_TABLE_AT + 5 * i] == 0x02 for i in range(STOCK_COURSES))
     assert table == [name_hash(n) for n in COURSES[:STOCK_COURSES]], [hex(h) for h in table]
-    assert name_hash(COURSES[STOCK_COURSES]) == netmenu.settings.EGG_COURSE and len(COURSES) == netmenu.settings.ONLINE_COURSES
+    # (the lobby's 26th entry, RANDOM COURSE, is no course: src/race.cpp kCourseRandom = len(COURSES))
+    assert name_hash(COURSES[STOCK_COURSES]) == netmenu.settings.EGG_COURSE and len(COURSES) == netmenu.settings.ONLINE_COURSES - 1
     lines = ["// Generated by tools/build_menus.py. Do not edit.", "#pragma once", "#include <stdint.h>",
              "struct RacerEntry { uint32_t hash; bool ai; const char* name; const char* display; };  // display: the racer's menu name",
              "struct CourseEntry { uint32_t hash; const char* name; };"]
-    for var, rows in (("kRacersRoster", roster), ("kRacersStock", netmenu.STOCK_ROWS), ("kRacersMetal", metal)):
+    for var, rows in (("kRacersRoster", roster), ("kRacersStock", netmenu.STOCK_ROWS), ("kRacersMetal", metal),
+                      ("kRacersMetalOnFoot", onfoot)):
         lines.append(f"static const RacerEntry {var}[{len(rows)}] = {{")
         for display, identity in rows:
             assert display.isascii() and '"' not in display and "\\" not in display, display

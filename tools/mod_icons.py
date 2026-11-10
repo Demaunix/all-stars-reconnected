@@ -1,12 +1,19 @@
 r"""Mod icons on the online game list (1.1 ENABLE MODIFICATIONS; the user's request 2026-10-24; re\m9-modifications\ICONS-FINDINGS.md).
 
 Each game-list row's SIGNAL cell (row node 5; the console's TU2 drew its DLC column there) shows which supported mods the lobby
-uses: EGG (Egg Hangar), METAL (Metal Sonic) or BOTH (Egg then Metal); a lobby without them keeps the stock signal bars. The
-sprites are 100x50, a single icon right-aligned; the 8 cells are widened from 50 to 100 px to the left (their KFRM size and key x
-floats, in place: the right edge stays). The three sprites live on one new uncompressed page (A8R8G8B8 256x128) merged like
+uses, left to right Egg Hangar, Metal Sonic, On-Foot Sonic (since 2026-11-10, notes\ONFOOT-ONLINE.md), each 50x50 as it is (K),
+with an orange dash (D: another version here) or a red X (X: not installed here); a lobby without them shows the stock signal
+bars. The sprites are 150x50, the icons right-aligned with no gap (a row with one or two mods looks exactly as before the third
+mod); the 8 cells are widened from 50 to 150 px to the left (their KFRM size and key x floats, in place: the right edge stays).
+The 64 sprites (63 states + the wide signal bars) live on one new uncompressed page (A8R8G8B8 1024x1024) merged like
 egg_lobby's card (Codex's merge_ptex). Art: Metal Sonic's racer portrait e76b1254 (from Metal Sonic's own version of the scene,
-its pixels as they are, 50x50 around its ring); Egg Hangar has no icon anywhere (an addition): the Death Egg from its lobby card
-b2a1f58a, scaled into a 40-px circle with a white ring and a dark edge like the portraits'.
+its pixels as they are, 50x50 around its ring); On-Foot Sonic's lobby portrait (his mod's results art 7af1b093, pixel for pixel
+the game's Sonic portrait 6d5ee0b1 that every lobby scene has, cut the same way: tools\onfoot_art.py); Egg Hangar has no icon
+anywhere (an addition): the Death Egg from its lobby card b2a1f58a, scaled into a 40-px circle with a white ring and a dark edge
+like the portraits'.
+Layout (2026-11-10): the STATUS words start 136 px left of the cell's old left edge; in the game's row font they are EN LOBBY 97,
+GE 97, FR ACCUEIL 135, SP PTO. ENC. 156, IT SALA ATTESA 215 px wide (scratchpad measure), so a 3-icon row (150 px) clears EN/GE/
+US/JP, touches FR's ACCUEIL and overlaps SP/IT (IT already overlaps a 2-icon row since 1.1): see build\onfoot_art\mod_icons_rows.png.
 
     import mod_icons; payload = mod_icons.add_icons(payload, metal_scene)   (metal_scene: Metal Sonic's version of the scene)
     python tools\mod_icons.py     a preview of the three sprites (build\mod_icons_preview.png) and their hashes
@@ -32,13 +39,15 @@ TICK = 0x9309F511    # the console's DLC-column tick (a white tick in a green ci
 X_HUE, DASH_HUE = 0 / 360, 34 / 360  # red (not installed here), orange (another version here)
 DASH_VALUE, X_VALUE = 1.45, 1.25  # the tick's green is dark: orange at the same value reads brown, red reads dull on the red rows
 OVERLAY = 190        # the marks' opacity over an icon (0-255)
-# Each used mod's state on this game, Egg then Metal: N not used by the lobby, K the same build, D another version, X not installed.
-STATE_PAIRS = [(e, m) for e in "NKDX" for m in "NKDX" if (e, m) != ("N", "N")]
+# Each used mod's state on this game, Egg, Metal, On-Foot: N not used by the lobby, K the same build, D another version, X not
+# installed.
+STATES = [(e, m, o) for e in "NKDX" for m in "NKDX" for o in "NKDX" if (e, m, o) != ("N", "N", "N")]
+ONFOOT_PORTRAIT = 0x6D5EE0B1  # the game's Sonic lobby portrait = On-Foot Sonic's own (tools\onfoot_art.SONIC_PORTRAIT)
 
 
-def art_name(e: str, m: str) -> int:
-    """A row state's sprite hash (src\\natives.cpp kNatRowMods builds the same name)."""
-    return path_hash(f"STEAMMP_MODS_{e}{m}")
+def art_name(e: str, m: str, o: str) -> int:
+    """A row state's sprite hash (src\\natives.cpp ModsArt builds the same name: Egg, Metal, On-Foot)."""
+    return path_hash(f"STEAMMP_MODS_{e}{m}{o}")
 
 
 # The SIGNAL column's header (nodes 8935d3e3, 9b3a9173, 7791ab5d; the console's TU2 put "DLC" there): our text key, per language.
@@ -48,13 +57,13 @@ HEADER_TEXT = {"EN": b"MODS", "US": b"MODS", "JP": b"MODS", "FR": b"MODS", "GE":
 SIGNAL = 0x7BF528A4  # the cells' stock sprite (four green bars)
 CELLS = (0x37D7E2E7, 0xFBF2B2DE, 0xE4418BBD, 0x53C56022, 0x91785224, 0xD2FE7054, 0x83166898, 0xE4E8720D)  # rows 0-7, node 5
 UNIT = 2048.0        # KFRM sizes: pixels / 2048 (the cells' 50 px = .0244)
-OLD_W, NEW_W = 50, 100
+OLD_W, NEW_W = 50, 150
 ICON = 50
-PAGE_W, PAGE_H = 256, 512
-# A lobby without supported mods: the stock signal bars, right-aligned in a 100x50 sprite (the stock 50x50 one stretched across the
-# widened cell; the user's mods.4 test).
-SIGNAL_WIDE = art_name("N", "N")
-SLOTS = {art_name(e, m): (128 * (i % 2), 64 * (i // 2)) for i, (e, m) in enumerate(STATE_PAIRS + [("N", "N")])}  # each sprite's top-left
+PAGE_W, PAGE_H = 1024, 1024
+# A lobby without supported mods: the stock signal bars, right-aligned in a 150x50 sprite (the stock 50x50 one stretched across the
+# widened cell; the user's mods.4 test). steam.py SIGNAL_ART is this hash (7307fbe0).
+SIGNAL_WIDE = art_name("N", "N", "N")
+SLOTS = {art_name(*s): (160 * (i % 6), 64 * (i // 6)) for i, s in enumerate(STATES + [("N", "N", "N")])}  # each sprite's top-left
 EGG_CROP = (0, 0, 141, 141)  # the card's square around the Death Egg (x0, y0, x1, y1 in its 396x141 pixels)
 
 
@@ -91,7 +100,8 @@ def egg_icon(card: np.ndarray) -> np.ndarray:
 
 
 def metal_icon(portrait: np.ndarray) -> np.ndarray:
-    """Metal Sonic's portrait, 50x50 around its ring (visible circle x22-70, y2-53 of the 90x55 sprite)."""
+    """Metal Sonic's portrait, 50x50 around its ring (visible circle x22-70, y2-53 of the 90x55 sprite). On-Foot Sonic's portrait
+    has its ring in the same place (circle_fit: centre 46.6, 29.5, diameter 49 for both) and is cut the same way."""
     assert portrait.shape[:2] == (55, 90), f"portrait is {portrait.shape}"
     return portrait[2:52, 21:71].copy()
 
@@ -170,16 +180,17 @@ def overlay(icon: np.ndarray, mark: np.ndarray) -> np.ndarray:
     return np.array(base)
 
 
-def sprites(egg: np.ndarray, metal: np.ndarray, tick: np.ndarray, signal: np.ndarray) -> dict:
-    """{art hash: 100x50 RGBA} for every row state (art_name): each used mod's icon as it is (K), with the orange dash (D: another
-    version here) or the red X (X: not installed here); a single icon right-aligned, two = Egg then Metal."""
+def sprites(egg: np.ndarray, metal: np.ndarray, onfoot: np.ndarray, tick: np.ndarray, signal: np.ndarray) -> dict:
+    """{art hash: 150x50 RGBA} for every row state (art_name): each used mod's icon as it is (K), with the orange dash (D: another
+    version here) or the red X (X: not installed here); the used ones right-aligned in the order Egg, Metal, On-Foot."""
     marks = {"K": None, "D": badge(tick, DASH_HUE, "-", DASH_VALUE), "X": badge(tick, X_HUE, "X", X_VALUE)}
     out = {}
-    for e, m in STATE_PAIRS:
-        icons = [overlay(icon, marks[s]) if marks[s] is not None else icon for icon, s in ((egg, e), (metal, m)) if s != "N"]
+    for e, m, o in STATES:
+        icons = [overlay(icon, marks[s]) if marks[s] is not None else icon
+                 for icon, s in ((egg, e), (metal, m), (onfoot, o)) if s != "N"]
         a = np.zeros((ICON, NEW_W, 4), np.uint8)
         a[:, NEW_W - ICON * len(icons):] = np.concatenate(icons, axis=1)
-        out[art_name(e, m)] = a
+        out[art_name(e, m, o)] = a
     assert signal.shape == (ICON, OLD_W, 4), signal.shape
     a = np.zeros((ICON, NEW_W, 4), np.uint8)
     a[:, NEW_W - OLD_W:] = signal
@@ -232,9 +243,9 @@ def widen_cells(kfrm: bytes) -> tuple:
 
 
 def all_sprites(base: bytes, metal_scene: bytes) -> dict:
-    """Every row state's sprite (the tick from the scene being built, the portrait from Metal Sonic's)."""
-    return sprites(egg_icon(card_pixels()), metal_icon(sprite_pixels(metal_scene, PORTRAIT)), sprite_pixels(base, TICK),
-                   sprite_pixels(base, SIGNAL))
+    """Every row state's sprite (the tick and On-Foot Sonic's portrait from the scene being built, Metal's from Metal Sonic's)."""
+    return sprites(egg_icon(card_pixels()), metal_icon(sprite_pixels(metal_scene, PORTRAIT)),
+                   metal_icon(sprite_pixels(base, ONFOOT_PORTRAIT)), sprite_pixels(base, TICK), sprite_pixels(base, SIGNAL))
 
 
 def add_icons(base: bytes, metal_scene: bytes, lang: str) -> bytes:
@@ -287,12 +298,32 @@ def check(scene: bytes, lang: str) -> None:
 if __name__ == "__main__":
     root = Path(__file__).resolve().parents[1]
     metal = (root / "reference" / "navigator-bases" / "metal-sonic-1.1.0-beta.3" / "E01CF5DC.dat").read_bytes()
-    _, page = page_dds(all_sprites(metal, metal))
-    big = Image.fromarray(page).resize((PAGE_W * 2, PAGE_H * 2), Image.NEAREST)
-    bg = Image.new("RGBA", big.size, (150, 20, 20, 255))  # (a game-list row's red)
-    bg.alpha_composite(big)
+    images = all_sprites(metal, metal)
+    _, page = page_dds(images)
+    used = max(y for _, y in SLOTS.values()) + 64
+    bg = Image.new("RGBA", (PAGE_W, used), (150, 20, 20, 255))  # (a game-list row's red)
+    bg.alpha_composite(Image.fromarray(page[:used]))
     out = root / "build" / "mod_icons_preview.png"
     bg.save(out)
-    print(out)
-    for e, m in STATE_PAIRS:
-        print(f"{e}{m} {art_name(e, m):08x}")
+    # A few game-list rows at the game's scale (1 px = 1/2048 of the row's frame): the STATUS words' extent per language (the
+    # row font's advances, scratchpad measure 2026-11-10) from x 656 (node 4), the widened cell ending at 929 (node 5).
+    from PIL import ImageDraw as _D
+    rows = ["KNN", "NKN", "NNK", "KKN", "NKK", "KKK", "XKD", "DXX", "NNN"]
+    status = (("EN", 97), ("FR", 135), ("SP", 156), ("IT", 215))
+    x0, cell_right, row_h = 560, 929, 74
+    sheet = Image.new("RGBA", (420, row_h * len(rows) + 20), (20, 20, 30, 255))
+    d = _D.Draw(sheet)
+    for i, s in enumerate(rows):
+        y = 10 + row_h * i
+        d.rectangle((0, y + 12, 420, y + 56), fill=(150, 20, 20, 255))
+        for j, (lang, w) in enumerate(status):
+            yy = y + 14 + 10 * j
+            d.rectangle((656 - x0, yy, 656 - x0 + w, yy + 7), outline=(255, 255, 255, 120))
+            d.text((656 - x0 + w + 2, yy - 3), lang, fill=(255, 255, 255, 160))
+        sheet.alpha_composite(Image.fromarray(images[art_name(*s)]), (cell_right - NEW_W - x0, y + 9))
+        d.text((2, y + 28), s, fill=(255, 255, 255, 255))
+    (root / "build" / "onfoot_art").mkdir(parents=True, exist_ok=True)
+    sheet.save(root / "build" / "onfoot_art" / "mod_icons_rows.png")
+    print(out, root / "build" / "onfoot_art" / "mod_icons_rows.png")
+    for s in STATES + [("N", "N", "N")]:
+        print(f"{''.join(s)} {art_name(*s):08x}")

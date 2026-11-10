@@ -1,6 +1,21 @@
 Steam Multiplayer - changelog
 
 {VERSION}
+- RANDOM racer and RANDOM course: the online racer picker has a RANDOM tile and the
+  course picker a RANDOM course. Each game rolls its own hidden pick; a racer someone
+  picked on purpose wins, and nobody ends up with the same racer twice. A RANDOM course
+  is rolled by the host, so everyone races the same one.
+- Fair start: a game that was frozen for a moment when the host's GO arrived started
+  its race clock late and got a better time than it really took. It now counts from
+  the real GO.
+- Your config.ini is kept by updates, and now also gets the lines of newer options
+  added at game start (with their default values), so every setting stays reachable.
+- The lobby shows a keyboard or controller picture in each player's bar.
+- The MODIFICATIONS popup and the game list's mod icons support one more racer mod
+  next to Metal Sonic and Egg Hangar, when the host has it.
+- Players need the same version to race together: 1.2.0 updates itself to 1.2.1.
+
+1.2.0
 - Controller button pictures: playing with a controller, the online menus (the lobby,
   the game list, the online results and the online pause menu) show the controller's
   own buttons instead of the keyboard's keys, with the consoles' own pictures: Xbox

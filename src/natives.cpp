@@ -13,6 +13,7 @@
 #include "modset.h"  // RefusalText: the join refusal pop-up's body
 #include "pad_glyphs.h"
 #include "race.h"
+#include "random_slots.h"
 #include "race_tables.h"
 #include "voice.h"  // VoiceKeyOf: the key names of config.ini
 
@@ -60,6 +61,13 @@ static void BarName(const LobbyMember& m, int32_t cap, char* out, size_t outSize
 static const uint32_t kBarBases[8] = {0xa25dd079, 0x6ec737ad, 0x36cb75a9, 0xfe74649d, 0x68e2774b, 0x1583ba8a, 0x6043e324, 0x74d20750};
 static const uint32_t kBarBlueArt = 0x5da8c97e, kBarMutedArt = 0xdd4e2bb1;
 static uint8_t g_barYellow[kMaxMembers];    // 1 = that bar shows the yellow art (its name needs no "(muted)")
+// Majority Drift Parity's device pictures (the user's request 2026-10-27: the lobby bars only, 2026-11-08): each bar's voice node
+// (the speech bubble 24064704, shown while that member talks; voice chat is off by default) shows the member's keyboard or
+// controller picture the rest of the time (tools\lobby_input_icons.py; set at the name's redraw, which comes right before the
+// script asks kMemberTalking). A lobby scene without the pictures (another mod's) keeps the bubble, shown only while talking.
+static const uint32_t kBarVoice[8] = {0x4e7d2ee9, 0xe9cc98e1, 0x6c2a3eb0, 0xe9cb15e3, 0x9f1504f9, 0x00154c74, 0xb9fa1d90, 0xfcc01dd8};
+static const uint32_t kBubbleArt = 0x24064704, kInputArtKeyboard = 0xc9db046b, kInputArtController = 0xd53a274e;
+static uint8_t g_barDevice[kMaxMembers];    // 1 = that bar's voice node shows the member's device picture
 // M8 (re\m8-audit C1): while the host's Start waits for every player's game to make race connections (a Steam certificate can take
 // minutes), the console's busy spinner (navigator_info's overlay, re\m8-spinners\FINDINGS.md) says CONNECTING (39E82599: in the
 // data, used by no console script) at the lobby's place; it fades out when the wait ends. Script context only (the frame native).
@@ -403,13 +411,15 @@ static int32_t ReadLicenseFlag() {
 }
 static int32_t (*g_licenseFlag)() = ReadLicenseFlag;
 
-// The row's mod-icons sprite (tools\mod_icons.py art_name: "STEAMMP_MODS_" + Egg's state + Metal's, N K D X, its path hash), 0 = none.
+// The row's mod-icons sprite (tools\mod_icons.py art_name: "STEAMMP_MODS_" + Egg's state + Metal's + On-Foot Sonic's, N K D X, its
+// path hash), 0 = none.
 static uint32_t ModsArt(int32_t mods) {
     const char letters[] = "NKDX";
-    char name[] = "STEAMMP_MODS_??";
+    char name[] = "STEAMMP_MODS_???";
     name[13] = letters[mods & 3];
     name[14] = letters[(mods >> 2) & 3];
-    if (!(mods & 15)) return 0;
+    name[15] = letters[(mods >> 4) & 3];
+    if (!(mods & 63)) return 0;
     uint32_t v = 0;  // (build_ui.path_hash: from the last character to the first, v = c + 131 * v)
     for (int i = (int)sizeof(name) - 2; i >= 0; --i) v = (uint8_t)name[i] + 131 * v;
     return v;
@@ -457,7 +467,8 @@ static void Handle(Descriptor* d) {
         if (!IntArg(d, 0, a) || !IntArg(d, 1, value)) return;
         if (a == 0) ReturnInt(d, LobbyModInstalled("metal-sonic") ? 1 : 0);
         else if (a == 1) ReturnInt(d, LobbyModInstalled("egg-hangar") ? 1 : 0);
-        else if (a == 2) { LobbySetHostMods((value & 1) != 0, (value & 2) != 0); ReturnInt(d, 1); }
+        else if (a == 2) { LobbySetHostMods((value & 1) != 0, (value & 2) != 0, (value & 4) != 0); ReturnInt(d, 1); }
+        else if (a == 4) ReturnInt(d, LobbyModInstalled("on-foot-sonic") ? 1 : 0);  // (with his add-on: LobbyModInstalled)
         else if (a == 3) ReturnInt(d, RefusalText(s.refusedMods));  // the join refusal pop-up's body (steam.py MODS_REFUSALS)
         else ReturnInt(d, -1);
         return;
@@ -603,10 +614,10 @@ static void Handle(Descriptor* d) {
         return;
     case kNatSetLocal: {
         static int32_t last[2] = {-2, -2};  // what Steam was last given
-        int32_t v[2];
+        int32_t v[4] = {0, 0, -1, 0};  // (no RANDOM pick)
         if (!IntArg(d, 0, v[0]) || !IntArg(d, 1, v[1])) return;
         v[1] = v[1] ? 1 : 0;
-        if ((v[0] != last[0] || v[1] != last[1]) && LobbyPostArgs(kCmdSetLocal, v, 2)) { last[0] = v[0]; last[1] = v[1]; }
+        if ((v[0] != last[0] || v[1] != last[1]) && LobbyPostArgs(kCmdSetLocal, v, 4)) { last[0] = v[0]; last[1] = v[1]; }
         ReturnInt(d, 1);
         return;
     }
@@ -660,8 +671,13 @@ static void Handle(Descriptor* d) {
         // this player is at the lobby itself: no racer popup, no Settings panel, no Steam overlay (INVITE FRIENDS) open,
         // as the console's check (user, 2026-10-22, from console footage).
         bool atLobby = v[1] == 0 && v[8] == 0 && !LobbyOverlayOpen();
-        int32_t local[2] = {v[11] ? -1 : v[0], !v[11] && atLobby ? 1 : 0};
-        static int32_t lastLocal[2] = {-2, -2};
+        // RANDOM (notes\RANDOM-SLOTS.md): the picker's row after the last racer. Every screen shows its player as the stock "?"
+        // (kRacerRandom has no racer hash); this game rolls the hidden pick the host's Start races (member data "rnd").
+        bool random = !v[11] && RaceRacerCount() > 0 && v[0] == RaceRacerCount();
+        bool randomDup = false;
+        int32_t randomPick = RaceRandomPick(s, random, randomDup);
+        int32_t local[4] = {v[11] ? -1 : random ? kRacerRandom : v[0], !v[11] && atLobby ? 1 : 0, randomPick, randomDup ? 1 : 0};
+        static int32_t lastLocal[4] = {-2, -2, -2, -2};
         // The heartbeat: away from the lobby screen for a moment (the race and its results, a loading screen), the worker
         // published "not ready"; back here, post again. (This runs every lobby frame: 500 per 10 s, gaps up to 32 ms.)
         static DWORD s_frameSeen = 0;
@@ -672,7 +688,7 @@ static void Handle(Descriptor* d) {
         }
         s_frameSeen = frameNow;
         LobbyNoteLobbyFrame();
-        if (memcmp(local, lastLocal, sizeof(local)) != 0 && LobbyPostArgs(kCmdSetLocal, local, 2)) {
+        if (memcmp(local, lastLocal, sizeof(local)) != 0 && LobbyPostArgs(kCmdSetLocal, local, 4)) {
             memcpy(lastLocal, local, sizeof(local));
             Log(false, L"lobby: this player is %s (racer %d)", local[1] ? L"ready" : L"not ready", local[0]);
         }
@@ -683,8 +699,8 @@ static void Handle(Descriptor* d) {
         if (RaceMenuPoll() == kRaceStart) {
             // Not ready while racing: the host can't start the next race until everyone is back in
             // the lobby (its first frame there publishes ready again).
-            int32_t racing[2] = {v[0], 0};
-            if (memcmp(racing, lastLocal, sizeof(racing)) != 0 && LobbyPostArgs(kCmdSetLocal, racing, 2)) memcpy(lastLocal, racing, sizeof(racing));
+            int32_t racing[4] = {local[0], 0, local[2], local[3]};
+            if (memcmp(racing, lastLocal, sizeof(racing)) != 0 && LobbyPostArgs(kCmdSetLocal, racing, 4)) memcpy(lastLocal, racing, sizeof(racing));
             ReturnInt(d, kFrameStartRace);
             return;
         }
@@ -702,7 +718,7 @@ static void Handle(Descriptor* d) {
         // take minutes after the game starts) waits, and the race starts by itself once all can. A player
         // not ready (still on the last race's results, or away from the lobby) is a plain refusal: the host
         // presses Start again (user, 2026-10-22: no start by itself once that player is back).
-        static bool s_waiting = false;
+        static bool s_waiting = false, s_waitRandom = false;
         static DWORD s_waitingSince = 0, s_lastFrame = 0;
         if (s_waiting && GetTickCount() - s_lastFrame > 1000) {  // the lobby screen was left meanwhile, or a dialog was up a while
             s_waiting = false;
@@ -727,25 +743,34 @@ static void Handle(Descriptor* d) {
         }
         if (!canStart && s_waiting) {
             s_waiting = false;
-            ConnectingSpinner(false);
+            if (!s_waitRandom) ConnectingSpinner(false);  // (a fade-out of a hidden overlay flashes it)
             Log(false, L"host Start: no longer waiting (the lobby changed)");
         }
         if (canStart && (v[9] || s_waiting)) {
             int32_t r = RaceHostStart();
-            if (r == kStartNetNotReady) {
-                if (!s_waiting) {
+            // Waits: CONNECTING (a game without its Steam certificate yet: the spinner, up to 3 minutes), or a RANDOM player's
+            // hidden pick still settling (a collision being re-rolled, an update in flight: no spinner, up to 5 s, then the stock
+            // "Not all players are ready."). Either way the race then starts by itself.
+            if (r == kStartNetNotReady || r == kStartRandomPending) {
+                bool rnd = r == kStartRandomPending;
+                if (!s_waiting || s_waitRandom != rnd) {
+                    bool first = !s_waiting;
+                    if (s_waiting && !s_waitRandom) ConnectingSpinner(false);
                     s_waiting = true;
+                    s_waitRandom = rnd;
                     s_waitingSince = GetTickCount();
-                    ConnectingSpinner(true);
-                    Log(true, L"host Start: waiting until every player's game can make race connections (CONNECTING); the race then starts by itself");
-                    ReturnInt(d, kFrameStartSent);  // the Start sound: heard
+                    if (!rnd) ConnectingSpinner(true);
+                    Log(!rnd, rnd ? L"host Start: a RANDOM player's pick is still settling; the race starts once it has"
+                                  : L"host Start: waiting until every player's game can make race connections (CONNECTING); the race then starts by itself");
+                    ReturnInt(d, first ? kFrameStartSent : kFrameNothing);  // the Start sound: heard
                     return;
                 }
-                if (GetTickCount() - s_waitingSince > 180000) {
+                if (GetTickCount() - s_waitingSince > (rnd ? 5000u : 180000u)) {
                     s_waiting = false;
-                    ConnectingSpinner(false);
-                    Log(true, L"host Start: a player's game still can't make race connections after 3 minutes; press Start again later");
-                    ReturnInt(d, kFrameStartRefused);
+                    if (!rnd) ConnectingSpinner(false);
+                    Log(true, rnd ? L"host Start: a RANDOM player's pick didn't settle in 5 s; not ready"
+                                  : L"host Start: a player's game still can't make race connections after 3 minutes; press Start again later");
+                    ReturnInt(d, rnd ? kFrameStartNotReady : kFrameStartRefused);
                     return;
                 }
                 ReturnInt(d, kFrameNothing);
@@ -753,7 +778,7 @@ static void Handle(Descriptor* d) {
             }
             bool pressed = v[9] != 0, waited = s_waiting;
             s_waiting = false;
-            if (waited) ConnectingSpinner(false);
+            if (waited && !s_waitRandom) ConnectingSpinner(false);
             Log(r ? true : false, L"host Start: %s (code %d)%s", r ? L"refused" : L"race sent to everyone", r, waited ? L" after waiting" : L"");
             if (r == kStartAlone) { ReturnInt(d, kFrameStartAlone); return; }  // the console's "at least two players" dialog
             if (r == kStartNotReady || r == kStartPlayerInRace || r == kStartRacerOff) { ReturnInt(d, kFrameStartNotReady); return; }  // "Not all players are ready."
@@ -792,7 +817,7 @@ static void Handle(Descriptor* d) {
             // still on the results screen shows no check (user, 2026-10-22).
             if (b == kMemberReady) ReturnInt(d, m.racer >= 0 && m.ready && m.place < 0 ? 1 : 0);
             else if (b == kMemberIsMe) ReturnInt(d, m.isMe ? 1 : 0);
-            else if (b == kMemberTalking) ReturnInt(d, m.talking ? 1 : 0);  // (voice chat: the bar's voice icon, as the console's)
+            else if (b == kMemberTalking) ReturnInt(d, m.talking || (a < kMaxMembers && g_barDevice[a]) ? 1 : 0);  // (voice chat: the bar's voice icon, as the console's; or the device picture)
             else if (b == kMemberRacingHere) {  // a race runs here (the console's guest footer drops CHANGE RACER then)
                 int racing = 0;
                 for (int i = 0; i < n; ++i) racing |= s.members[i].place >= 0 && s.members[i].raceId && s.members[i].raceId != RaceLastId() ? 1 : 0;
@@ -807,6 +832,10 @@ static void Handle(Descriptor* d) {
             if (a < 8) {
                 yellow = m.muted && g_elemArt(kBarBases[a], kBarMutedArt);
                 if (!yellow) g_elemArt(kBarBases[a], kBarBlueArt);
+                // The voice node: the bubble while talking, else the device picture (when the scene has it and the device is known).
+                uint32_t device = m.input == kInputKeyboard ? kInputArtKeyboard : m.input == kInputController ? kInputArtController : 0;
+                g_barDevice[a] = !m.talking && device && g_elemArt(kBarVoice[a], device) ? 1 : 0;
+                if (!g_barDevice[a]) g_elemArt(kBarVoice[a], kBubbleArt);
             }
             char text[kNameLen + 16];
             if (status) StatusText(m, text, sizeof(text));
@@ -822,10 +851,10 @@ static void Handle(Descriptor* d) {
         return;
     }
     case kNatHostRule: {
-        // The menu's bounds per field (tools/netmenu/settings.py BOUNDS, laps 1-9; courses 0-24, Egg Hangar's the 25th): a
-        // value outside them would index the panel's label tables past their end.
-        static const int32_t kLow[kRuleCount] = {0, 1, 0, 0, 0, 0},
-                             kHigh[kRuleCount] = {(int32_t)(sizeof(kCourses) / sizeof(kCourses[0])) - 1, 9, 7, 3, 1, 1};
+        // The menu's bounds per field (tools/netmenu/settings.py BOUNDS, laps 1-9; courses 0-24, Egg Hangar's the 25th, RANDOM
+        // COURSE the 26th): a value outside them would index the panel's label tables past their end.
+        static_assert(sizeof(kCourses) / sizeof(kCourses[0]) == kCourseRandom, "RANDOM COURSE follows the last course");
+        static const int32_t kLow[kRuleCount] = {0, 1, 0, 0, 0, 0}, kHigh[kRuleCount] = {kCourseRandom, 9, 7, 3, 1, 1};
         const int32_t* r = &s.rules.course;
         if (!IntArg(d, 0, a)) return;
         bool ok = s.state == kLobbyInLobby && !s.isHost && a >= 0 && a < kRuleCount && r[a] >= kLow[a] && r[a] <= kHigh[a];

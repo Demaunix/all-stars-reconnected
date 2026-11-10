@@ -79,6 +79,8 @@ static void DecodeAll(const uint8_t* src, size_t size) {
         if (DecodeVoice(in.p, in.n, v)) { ++g_accepted[kMsgVoice]; CHECK(v.slot < kMaxHumans && same(EncodeVoice(v, out, sizeof(out))), "voice line"); }
         RaceItemLine l;
         if (DecodeItemLine(in.p, in.n, l)) { ++g_accepted[kMsgItemLine]; CHECK(ItemLineValid(l) && same(EncodeItemLine(l, out, sizeof(out))), "item line"); }
+        RaceLook lk;
+        if (DecodeLook(in.p, in.n, lk)) { ++g_accepted[kMsgLook]; CHECK(LookValid(lk) && lk.slot < kGridSlots && same(EncodeLook(lk, out, sizeof(out))), "look"); }
         RaceAnnounce a;
         if (DecodeAnnounce(in.p, in.n, a)) { ++g_accepted[kMsgAnnounce]; CHECK(a.wait >= 0 && same(EncodeAnnounce(a, out, sizeof(out))), "announce"); }
     }
@@ -126,6 +128,7 @@ static size_t SizeFor(uint8_t type) {
     case kMsgAnnounce: return wire::kAnnounceSize;
     case kMsgVoice: return wire::kVoiceSize;
     case kMsgItemLine: return wire::kItemLineSize;
+    case kMsgLook: return wire::kLookSize;
     default: return Below(kWireMax + 16);
     }
 }
@@ -133,7 +136,7 @@ static size_t SizeFor(uint8_t type) {
 // A header that passes Open for some type, then a body of bytes that are often in range.
 static void FuzzWellFramed() {
     uint8_t buf[kWireMax + 64] = {};
-    uint8_t type = Below(10) ? (uint8_t)(1 + Below(14)) : Byte();
+    uint8_t type = Below(10) ? (uint8_t)(1 + Below(15)) : Byte();
     size_t size = Below(8) ? SizeFor(type) : Below(kWireMax + 32);
     if (size > sizeof(buf)) size = sizeof(buf);
     for (size_t i = 0; i < size; ++i) buf[i] = Below(3) ? (uint8_t)Below(9) : Byte();  // small values pass the range checks
@@ -161,7 +164,7 @@ static size_t ValidMessage(uint8_t* out, size_t cap) {
         RaceContract c = {};
         c.race = race; c.seed = (uint32_t)Next(); c.course = Byte(); c.courseHash = (uint32_t)Next();
         c.laps = (uint8_t)(1 + Below(9)); c.items = (uint8_t)Below(2); c.catchup = (uint8_t)Below(2); c.ai = (uint8_t)Below(4);
-        c.flags = (uint8_t)(Below(2) ? kContractHostAi | kContractItems : Below(2) * kContractAnnouncer) | (uint8_t)(Below(2) * kContractNoDriftPlus);
+        c.flags = (uint8_t)(Below(2) ? kContractHostAi | kContractItems : Below(2) * kContractAnnouncer) | (uint8_t)(Below(2) * kContractNoDriftPlus) | (uint8_t)(Below(2) ? 0 : Below(2) ? kContractDriftKeyboard : kContractDriftController);
         c.humanCount = (uint8_t)(2 + Below(kMaxHumans - 1));
         for (int i = 0; i < c.humanCount; ++i) c.humans[i] = 76561197960265728ull + (uint64_t)i * 7 + 1;
         for (int i = 0; i < kGridSlots; ++i) c.roster[i] = 0x10000 + (uint32_t)i * 3 + 1;
@@ -378,7 +381,7 @@ int main(int argc, char** argv) {
     }
     printf("fuzz: %lld inputs in %lu ms; accepted:", iterations, GetTickCount() - start);
     static const char* names[32] = {nullptr, "contract", "loaded", "go", "pose", "abort", "finished", "cars", "results", "event", "intro", "announce",
-                                     "wrongway", "voice line", "item line", nullptr, nullptr, nullptr, nullptr, nullptr, "voice packet", "mods", "steam id", "figure",
+                                     "wrongway", "voice line", "item line", "look", nullptr, nullptr, nullptr, nullptr, "voice packet", "mods", "steam id", "figure",
                                      "fire launch"};
     for (int i = 0; i < 32; ++i)
         if (names[i]) printf(" %s %lld", names[i], g_accepted[i]);

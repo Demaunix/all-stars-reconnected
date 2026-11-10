@@ -7,6 +7,7 @@ if not exist "%SDK%\public\steam\steam_api.h" (echo Steamworks SDK 1.65 not extr
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars32.bat" >nul 2>nul || exit /b 1
 if not exist "%ROOT%\build" mkdir "%ROOT%\build"
 python -I "%ROOT%\tools\build_menus.py" "%ROOT%" || exit /b 1
+python -I "%ROOT%\tools\config_embed.py" "%ROOT%" || exit /b 1
 cl /nologo /c /O2 /MT /GS /EHsc /W3 /std:c++17 /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN ^
    /I"%ROOT%\src" /I"%ROOT%\src\chaogarage" /I"%ROOT%\build" /I"%SDK%\public" ^
    /Fo"%ROOT%\build\\" "%ROOT%\src\steam_mp.cpp" "%ROOT%\src\background.cpp" "%ROOT%\src\script_subst.cpp" "%ROOT%\src\natives.cpp" "%ROOT%\src\race.cpp" "%ROOT%\src\voice.cpp" "%ROOT%\src\update.cpp" "%ROOT%\src\pad_glyphs.cpp" || exit /b 1

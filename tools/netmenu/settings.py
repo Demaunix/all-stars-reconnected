@@ -30,17 +30,22 @@ COURSE_TOTAL = STOCK_COURSES  # the online build sets ONLINE_COURSES while it ru
 # Egg Hangar, the console's 25th lobby course (title update 2 fe_network_game: the course map's entry [course, art, name] and
 # the order array's last item; the art and name come with our lobby scenes, tools/egg_lobby.py). Offered only where the
 # Egg Hangar mod is installed: the C++ answers its availability query (2003 command 73) "no" otherwise.
-ONLINE_COURSES = STOCK_COURSES + 1
 EGG_COURSE, EGG_ART, EGG_NAME = 0x2c0dae1f,0xb2a1f58a,0xc6b8b684
+# RANDOM COURSE (an addition, the user's request 2026-11-09; notes/RANDOM-SLOTS.md): the 26th entry, after Egg Hangar. Its card and
+# name come with our lobby / popups scenes (tools/random_art.py); the C++ answers its availability query yes and the host's Start
+# rolls a real course (src/race.cpp kCourseRandom).
+RANDOM_COURSE, RANDOM_ART, RANDOM_NAME = 0xa58e5227,0xd9b102b7,0xa560e6d8  # name_hash('steammp_random_course'), ('..._art'), ('STEAMMP_RANDOM_COURSE')
+ONLINE_COURSES = STOCK_COURSES + 2
 MAP_CLOSE, ORDER_CLOSE = 0x89f,0x921  # in the stock stub: the map's `22 09 00 <48>` and the order's `22 08 00 <24>`
 
 
 def egg_insertions(original):
-    """{offset in the stock stub: bytes inserted before it}: Egg's map entry and order item."""
+    """{offset in the stock stub: bytes inserted before it}: Egg's and RANDOM COURSE's map entries and order items."""
     assert original[MAP_CLOSE:MAP_CLOSE+10]==bytes.fromhex('22090030000000271100')
     assert original[ORDER_CLOSE:ORDER_CLOSE+10]==bytes.fromhex('22080018000000271200')
-    entry=b''.join(b'\x02'+struct.pack('<I',v) for v in (EGG_COURSE,EGG_ART,EGG_NAME))+bytes.fromhex('22080002000000')
-    return {MAP_CLOSE:entry,ORDER_CLOSE:b'\x02'+struct.pack('<I',EGG_COURSE)}
+    entry=lambda course,art,name:b''.join(b'\x02'+struct.pack('<I',v) for v in (course,art,name))+bytes.fromhex('22080002000000')
+    return {MAP_CLOSE:entry(EGG_COURSE,EGG_ART,EGG_NAME)+entry(RANDOM_COURSE,RANDOM_ART,RANDOM_NAME),
+            ORDER_CLOSE:b'\x02'+struct.pack('<I',EGG_COURSE)+b'\x02'+struct.pack('<I',RANDOM_COURSE)}
 
 
 def draft(c,index):

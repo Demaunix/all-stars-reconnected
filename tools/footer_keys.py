@@ -30,10 +30,13 @@ import numpy as np  # noqa: E402
 from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 import dialog_icons  # noqa: E402
 import lobby_drift_row  # noqa: E402
+import lobby_input_icons  # noqa: E402
 import egg_lobby  # noqa: E402
 import lobby_bars  # noqa: E402
 import mod_icons  # noqa: E402
+import onfoot_art  # noqa: E402
 import pad_glyphs  # noqa: E402
+import random_art  # noqa: E402
 import steam_tiles as st  # noqa: E402
 import text_tables  # noqa: E402
 from scene_container import packer_for, sections6  # noqa: E402
@@ -289,9 +292,10 @@ def exact_alpha(ptex: bytearray, page: tuple, painted: np.ndarray, blocks: list)
 
 # ---------------------------------------------------------------- all scenes, every base
 # The tools whose change rebuilds the scenes (tools/package.py checks the same list).
-INPUTS = ("steam_tiles.py", "text_tables.py", "dialog_icons.py", "scene_container.py", "lobby_bars.py", "egg_lobby.py", "mod_icons.py", "lobby_drift_row.py", "codexui/build_ui.py",
-          "codexui/decode_ui_texture.py", "codexui/probe.py", "pad_glyphs.py")
-CELLS = ("reference/pad-glyphs/cells.json", "reference/pad-glyphs/cells.bin")  # the controller pictures (tools\pad_glyphs.py)
+INPUTS = ("steam_tiles.py", "text_tables.py", "dialog_icons.py", "scene_container.py", "lobby_bars.py", "egg_lobby.py", "mod_icons.py", "lobby_drift_row.py", "lobby_input_icons.py", "codexui/build_ui.py",
+          "codexui/decode_ui_texture.py", "codexui/probe.py", "pad_glyphs.py", "random_art.py", "onfoot_art.py")
+CELLS = ("reference/pad-glyphs/cells.json", "reference/pad-glyphs/cells.bin",  # the controller pictures (tools\pad_glyphs.py)
+         "reference/random-art/question-marks-hd.webp", "reference/random-art/course-card-hd.webp")  # RANDOM art (random_art.INPUTS)
 METAL_PORTRAIT_SCENE = "metal-sonic-1.1.0-beta.3/E01CF5DC.dat"  # (under BASES) Metal Sonic's racer portrait for the game list's mod icons
 
 
@@ -341,16 +345,25 @@ def build(root: Path) -> dict:
                 payload = egg_lobby.add_card(payload, lobby_bars.SCENES[key])
                 payload = mod_icons.add_icons(payload, (root / BASES / METAL_PORTRAIT_SCENE).read_bytes(), lobby_bars.SCENES[key])
                 payload, row = lobby_drift_row.add_row(payload, name)
+                payload = lobby_input_icons.add_icons(payload)
+                payload = random_art.add_lobby(payload, lobby_bars.SCENES[key])
+                payload = onfoot_art.add_lobby(payload, lobby_bars.SCENES[key])  # (only where Metal Sonic's portrait is)
                 facts["drift_row"] = row
+                facts["onfoot"] = onfoot_art.check(payload, "lobby")
                 op_name = (f"lobby scene ({lobby_bars.SCENES[key]}): the yellow bar of a muted player, Egg Hangar's course card, "
-                           "the game list's mod icons, the rules panel's DRIFT+ row")
+                           "the game list's mod icons, the rules panel's DRIFT+ row, the bars' keyboard / controller pictures, the RANDOM COURSE card"
+                           + (", On-Foot Sonic's lobby portrait" if facts["onfoot"] else ""))
                 print(f"{name}: record {facts['index']}, {facts['blocks']} blocks re-encoded (error {facts['reencode_error']}), "
                       f"{facts['pointers_moved']} pointers / {facts['relo_fields_moved']} RELO fields moved")
             elif key in egg_lobby.POPUP_SCENES:
                 lang = egg_lobby.POPUP_SCENES[key]
                 payload = egg_lobby.add_popup_name(entry, lang)
-                facts = {"text": "%08X" % egg_lobby.NAME}
-                op_name = f"lobby Settings popup scene ({lang}): Egg Hangar's course name"
+                payload = random_art.add_popup(payload, lang)
+                payload = onfoot_art.add_popup(payload, lang)  # (only where Metal Sonic's popup portrait and name are)
+                facts = {"text": "%08X" % egg_lobby.NAME, "random": ["%08X" % k for k in (random_art.PORTRAIT, random_art.RACER_TEXT, random_art.COURSE_TEXT)],
+                         "onfoot": onfoot_art.check(payload, "popup")}
+                op_name = (f"lobby popups scene ({lang}): Egg Hangar's course name, the RANDOM racer portrait and name, the RANDOM COURSE name"
+                           + (", On-Foot Sonic's popup portrait and name" if facts["onfoot"] else ""))
                 print(f"{base}/popups {lang}: Egg Hangar's name ({len(entry)} -> {len(payload)} stored bytes)")
             elif key in pad_glyphs.RESULTS:
                 kind, lang = pad_glyphs.RESULTS[key]

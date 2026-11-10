@@ -24,6 +24,7 @@
 #include "log.h"
 #include "modset.h"
 #include "lobby.h"
+#include "random_slots.h"
 #include "natives.h"
 #include "race_wire.h"
 #include "net_budget.h"
@@ -34,9 +35,11 @@
 #include "update.h"
 #include "figure_presence.h"
 #include "pad_glyphs.h"
+#include "config_merge.h"
+#include "config_template_embed.h"  // build\, from package\config.ini (tools\config_embed.py)
 
 #define MOD_NAME L"Steam Multiplayer"
-#define MOD_VERSION "1.2.0"
+#define MOD_VERSION "1.2.1"
 static const uint32_t kAppId = 34190;
 // sdk/redistributable_bin/steam_api.dll from Steamworks SDK 1.65 (32-bit).
 static const char kSteamApiSha256[] = "1cb8b7cb77923762d4e49b27e44295369a79e93b5d4282c5e840b268d28fe771";
@@ -119,6 +122,46 @@ static bool BindSteamApi() {
 }
 
 // ---------------------------------------------------------------- helpers
+// The option lines a kept config.ini lacks (config_merge.h): added once at start, before anything reads the file. The
+// added values are the code's defaults, so this changes nothing in play; it only lets the player see and change them.
+static void ConfigAddMissing(const std::wstring& dir) {
+    std::wstring path = dir + L"\\config.ini";
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {  // no config.ini: the defaults apply, nothing to add to
+        DWORD err = GetLastError();
+        if (err != ERROR_FILE_NOT_FOUND) Log(false, L"config.ini: can't be opened to add new options (error %lu); left as it is", err);
+        return;
+    }
+    LARGE_INTEGER size = {};
+    std::string user;
+    bool ok = GetFileSizeEx(f, &size) && size.QuadPart <= (1 << 20);
+    if (ok) {
+        user.resize((size_t)size.QuadPart);
+        DWORD got = 0;
+        ok = user.empty() || (ReadFile(f, &user[0], (DWORD)user.size(), &got, nullptr) && got == user.size());
+    }
+    CloseHandle(f);
+    if (!ok) { Log(false, L"config.ini: can't be read to add new options; left as it is"); return; }
+    std::string merged;
+    std::vector<std::string> added;
+    if (!config_merge::ConfigMerge(kConfigTemplate, user, merged, &added)) return;
+    std::wstring tmp = path + L".tmp";
+    HANDLE out = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    DWORD wrote = 0;
+    ok = out != INVALID_HANDLE_VALUE && WriteFile(out, merged.data(), (DWORD)merged.size(), &wrote, nullptr) &&
+         wrote == merged.size() && FlushFileBuffers(out);
+    if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+    if (!ok || !MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DWORD err = GetLastError();
+        DeleteFileW(tmp.c_str());
+        Log(false, L"config.ini: the new options couldn't be added (error %lu); left as it is", err);
+        return;
+    }
+    std::string names;
+    for (auto& n : added) names += (names.empty() ? "" : ", ") + n;
+    Log(false, L"config.ini: added the options it lacked, with their default values: %hs", names.c_str());
+}
+
 static bool FileSha256(const std::wstring& path, std::string& hex) {
     HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) return false;
@@ -178,11 +221,19 @@ static std::string g_modsEncoded;
 static bool g_modsOk = false;
 // ENABLE MODIFICATIONS (1.1): the toggleable mods (modset.h ModToggleable) the host turned off for the lobby it creates next
 // (LobbySetHostMods, from the menu's question; none until it is answered, as 1.0.0).
-static volatile LONG g_hostMetalOff, g_hostEggOff;
+static volatile LONG g_hostMetalOff, g_hostEggOff, g_hostOnFootOff;
+// (On-Foot Sonic counts as installed only with his add-on, which holds his racer data: without it he stays off, never listed.)
+static bool OnFootInstalled();
 static std::vector<std::string> HostModsOff() {
     std::vector<std::string> off;
-    if (InterlockedCompareExchange(&g_hostMetalOff, 0, 0)) off.push_back("metal-sonic");
+    bool onFoot = !InterlockedCompareExchange(&g_hostOnFootOff, 0, 0) && OnFootInstalled();
+    // (On-Foot Sonic ON keeps Metal Sonic ON: his racer list is Metal's + him, so every game in his lobby needs Metal's too)
+    if (InterlockedCompareExchange(&g_hostMetalOff, 0, 0) && !onFoot) off.push_back("metal-sonic");
     if (InterlockedCompareExchange(&g_hostEggOff, 0, 0)) off.push_back("egg-hangar");
+    if (!onFoot) {
+        off.push_back(kOnFootId);
+        off.push_back(kOnFootAddonId);
+    }
     return off;
 }
 static int g_testPlayers = 0;  // config.ini [Debug] TestPlayers: pretend players in the lobbies this game hosts (lobby.h)
@@ -275,12 +326,20 @@ void LobbyNoteRaceStart() {
     if (g_wake) SetEvent(g_wake);
 }
 // (g_mods is written once at start-up, before any menu runs.)
-bool LobbyModInstalled(const char* id) { return g_modsOk && ModListed(g_mods, id); }
-void LobbySetHostMods(bool metalOn, bool eggOn) {
+bool LobbyModInstalled(const char* id) {
+    return g_modsOk && (strcmp(id, kOnFootId) == 0 ? OnFootInstalled() : ModListed(g_mods, id));
+}
+// (and only when this game's lobby racer list has him: the 23-racer module, which needs Metal Sonic's package; without it the
+// row isn't offered and he's never listed, or the lists of two games could disagree; the independent check of 2026-11-10)
+static bool OnFootInstalled() {
+    return g_modsOk && OnFootComplete(g_mods) && ScriptSubstOnFootListed();
+}
+void LobbySetHostMods(bool metalOn, bool eggOn, bool onFootOn) {
     InterlockedExchange(&g_hostMetalOff, metalOn ? 0 : 1);
     InterlockedExchange(&g_hostEggOff, eggOn ? 0 : 1);
-    Log(false, L"ENABLE MODIFICATIONS: the next lobby uses Metal Sonic %s, Egg Hangar %s", metalOn ? L"if installed" : L"off",
-        eggOn ? L"if installed" : L"off");
+    InterlockedExchange(&g_hostOnFootOff, onFootOn ? 0 : 1);
+    Log(false, L"ENABLE MODIFICATIONS: the next lobby uses Metal Sonic %s, Egg Hangar %s, On-Foot Sonic %s",
+        metalOn ? L"if installed" : L"off", eggOn ? L"if installed" : L"off", onFootOn ? L"if installed" : L"off");
 }
 
 bool LobbyPostArgs(LobbyCommandKind kind, const int32_t* args, int count) {
@@ -368,6 +427,7 @@ static void PutRaceIn(uint64_t from, const void* data, uint32_t size, bool relia
     m.peer = from;
     m.size = size;
     m.reliable = reliable;
+    m.arrived = GetTickCount() | 1;  // (the game thread may take it much later: a long frame; the race clock's GO uses it)
     memcpy(m.data, data, size);
     LeaveCriticalSection(&g_raceLock);
 }
@@ -442,6 +502,8 @@ public:
         if (c.kind == kCmdSetLocal) {  // member data: kept, and written to whatever lobby we are in
             m_localRacer = c.args[0];
             m_localReady = c.args[1] ? 1 : 0;
+            m_localRandom = c.args[2] >= 0 && c.args[2] < kRandomMaxRacers ? c.args[2] : -1;
+            m_localRandomDup = m_localRandom >= 0 && c.args[3] ? 1 : 0;
             WriteLocalData();
             return;
         }
@@ -755,7 +817,7 @@ private:
         row.otherMods = !row.otherVersion && !ModsMatch(lobby, false);  // (the console's compatibility column: the join would be refused)
         std::vector<ModEntry> needs;
         if (DecodeMods(mm->GetLobbyData(lobby, kModsKey), needs)) {  // the row's mod icons, each marked by how this game has it
-            row.mods = ModStateFor(g_mods, needs, "egg-hangar") | ModStateFor(g_mods, needs, "metal-sonic") << 2;
+            row.mods = ModIcons(g_mods, needs);
             row.otherModsRest = row.otherMods && (!g_modsOk || ModsDifferBeyondIcons(g_mods, needs));
         } else {
             row.otherModsRest = row.otherMods;
@@ -817,7 +879,7 @@ private:
         CloseRaceSessions();
         SteamMatchmaking()->LeaveLobby(m_lobby);
         Log(false, L"left lobby %llu", m_lobby.ConvertToUint64());
-        RaceLobbyMods(true, true);  // (outside a lobby every installed mod is in use, as offline)
+        RaceLobbyMods(true, true, true);  // (outside a lobby every installed mod is in use, as offline)
         m_lobby = CSteamID();
         m_host = CSteamID();
         m_hostGone = CSteamID();
@@ -888,7 +950,8 @@ private:
     // ENABLE MODIFICATIONS: this lobby uses a toggleable mod only if its required list names it (the joiner's check made sure
     // every game in it has that mod; a toggleable mod it leaves out stays off on every game).
     static void UseLobbyMods(const std::vector<ModEntry>& required) {
-        RaceLobbyMods(ModListed(required, "egg-hangar"), ModListed(required, "metal-sonic"));
+        RaceLobbyMods(ModListed(required, "egg-hangar"), ModListed(required, "metal-sonic"),
+                      OnFootComplete(required));
     }
 
     // ---- KICK (M7). Steam lobbies have no kick call: the host names the member in lobby data "kick" (its game leaves when it
@@ -952,6 +1015,8 @@ private:
         sprintf_s(v, "%d", m_localRacer);
         SteamMatchmaking()->SetLobbyMemberData(m_lobby, "racer", v);
         SteamMatchmaking()->SetLobbyMemberData(m_lobby, "ready", m_localReady ? "1" : "0");
+        RandomData(m_localRandom, m_localRandomDup != 0, v, sizeof(v));  // RANDOM's hidden pick (src\random_slots.h)
+        SteamMatchmaking()->SetLobbyMemberData(m_lobby, "rnd", v);
         SteamMatchmaking()->SetLobbyMemberData(m_lobby, "net", m_netReady ? "1" : "0");
         int32_t input = (int32_t)InterlockedCompareExchange(&g_localInput, 0, 0);
         if (input != m_postedInput)
@@ -1361,6 +1426,8 @@ private:
             const char* inp = mm->GetLobbyMemberData(m_lobby, CSteamID(m.id), "inp");
             // (Null once Steam has dropped that member, e.g. a host quitting while this game is on the results.)
             m.input = m.isMe ? m_postedInput : !inp ? kInputUnknown : !strcmp(inp, "k") ? kInputKeyboard : !strcmp(inp, "c") ? kInputController : kInputUnknown;
+            if (m.isMe) m.random = m_localRandom, m.randomDup = m_localRandomDup;
+            else RandomParse(mm->GetLobbyMemberData(m_lobby, CSteamID(m.id), "rnd"), m.random, m.randomDup);  // (null-safe)
         }
         int v[kRuleCount];
         char tail = 0;
@@ -1420,6 +1487,7 @@ private:
             LobbyMember m = {};
             m.id = kTestPlayerBase + k + 1;
             m.input = kInputUnknown;  // (the Drift+ rule and the majority count only real players)
+            m.random = -1;            // (no RANDOM pick: a test player always has its racer)
             sprintf_s(m.name, "Test Player %d", k + 1);
             m.racer = same ? hostRacer : RaceTestPlayerRacer(k, taken, takenCount);
             m.ready = m.racer >= 0;
@@ -1809,6 +1877,7 @@ private:
     Command m_deferred = {};   // the menu command waiting for a pending create/join
     bool m_hasDeferred = false;
     int32_t m_localRacer = -1, m_localReady = 0;  // what our menu last set (member data)
+    int32_t m_localRandom = -1, m_localRandomDup = 0;  // RANDOM's hidden pick (member data "rnd")
     LobbyRules m_localRules = kNoRules;           // what our menu last set as host
     LobbyRules m_rules = kNoRules;                // the current lobby's rules, as Steam has them
     std::vector<uint64_t> m_peers;                // games we exchanged race messages with
@@ -1914,6 +1983,7 @@ extern "C" HRESULT __cdecl SsasrModInitialize(const SsasrHostApiV1* api, const w
     std::wstring dir = modDir;
     g_logPath = dir + L"\\SteamMultiplayer.log";
     Log(false, L"---- " MOD_NAME L" " TEXT(MOD_VERSION) L" starting, pid %lu", GetCurrentProcessId());
+    ConfigAddMissing(dir);  // before anything reads config.ini
     // Friend figures: the switch, and this player's figure from config.ini (unless a racer mod set one already through AsrFigureSetSelf).
     g_figureEnabled = GetPrivateProfileIntW(L"Friends", L"Enabled", 0, (dir + L"\\config.ini").c_str()) != 0;
     if (g_figureEnabled) Log(true, L"figure: friend figures are on (config.ini [Friends] Enabled=1)");
@@ -1930,6 +2000,16 @@ extern "C" HRESULT __cdecl SsasrModInitialize(const SsasrHostApiV1* api, const w
         if (ModInstalled(dir.substr(0, dir.find_last_of(L"\\")), kLocalRacerPack)) {
             ScriptSubstUseStockRacers();
             Log(false, L"a racer pack is installed: its racers stay offline; online games use the stock racers, and it isn't part of the mod check");
+        }
+        // On-Foot Sonic (notes\ONFOOT-ONLINE.md): with him and his add-on installed (its own folder, or inside his: a merged
+        // build, modset.h OnFootComplete), online games list him after Metal Sonic.
+        std::wstring modsHere = dir.substr(0, dir.find_last_of(L"\\"));
+        std::vector<ModEntry> scanned;
+        std::wstring scanBad;
+        if (ModInstalled(modsHere, kOnFootId) && ScanMods(modsHere, scanned, scanBad) && OnFootComplete(scanned)) {
+            ScriptSubstUseOnFootRacers();
+            Log(false, L"On-Foot Sonic and his add-on are installed (%s): online games with Metal Sonic list him too (a lobby switch, like Metal's)",
+                ModListed(scanned, kOnFootAddonId) ? L"its own folder" : L"inside his folder");
         }
         ScriptSubstInstall(api->game_image, dir);
         RaceConfigure((dir + L"\\config.ini").c_str());

@@ -25,7 +25,7 @@ static int32_t g_input = -2;
 void LobbyNoteInput(int32_t kind) { g_input = kind; }
 static int g_hostMods = -1;
 bool LobbyModInstalled(const char* id) { return !strcmp(id, "egg-hangar"); }  // (fake: Egg Hangar only)
-void LobbySetHostMods(bool metalOn, bool eggOn) { g_hostMods = (metalOn ? 1 : 0) | (eggOn ? 2 : 0); }
+void LobbySetHostMods(bool metalOn, bool eggOn, bool onFootOn) { g_hostMods = (metalOn ? 1 : 0) | (eggOn ? 2 : 0) | (onFootOn ? 4 : 0); }
 static int32_t FakeLicenseFlag() { return 34; }  // France
 void NativesTestSetLicenseFlag(int32_t (*fn)());
 static int32_t g_lastArgs[8];
@@ -56,6 +56,9 @@ const RaceContract* RaceContractArmed() { return g_poll == kRaceStart ? &g_contr
 int RaceLocalIndex() { return 1; }
 uint32_t RaceRacerHash(int index) { return index >= 0 && index < 25 ? 0x9a530000u + (uint32_t)index : 0; }
 bool RaceRacerOn(int index) { return index != 24; }  // (fake: the last racer's mod is off)
+int RaceRacerCount() { return 25; }
+int g_fakeRandomPick = -1;  // (fake: RANDOM's hidden pick while the player is on RANDOM)
+int32_t RaceRandomPick(const LobbySnapshot&, bool random, bool& dup) { dup = false; return random ? g_fakeRandomPick : -1; }
 static uint32_t g_lastRace = 0;
 uint32_t RaceLastId() { return g_lastRace; }
 // The lobby's race bar: the element helpers, faked.
@@ -68,7 +71,11 @@ static void __stdcall FakeShow(uint32_t e, uint32_t one) { Elem(1, e, one, 0, 0)
 static void __stdcall FakeHide(uint32_t e, uint32_t one) { Elem(2, e, one, 0, 0); }
 static void __stdcall FakePose(uint32_t e, uint32_t a, uint32_t b, float t) { Elem(3, e, a, b, t); }
 static bool g_artMissing = false;  // the yellow bar's art not in the scene (another mod's lobby scene): 0x47f400 answers 0
-static bool __stdcall FakeArt(uint32_t e, uint32_t art) { Elem(4, e, art, 0, 0); return !(g_artMissing && art == 0xdd4e2bb1); }
+static bool g_inputArtMissing = false;  // the device pictures not in the scene (another mod's lobby scene)
+static bool __stdcall FakeArt(uint32_t e, uint32_t art) {
+    Elem(4, e, art, 0, 0);
+    return !(g_artMissing && art == 0xdd4e2bb1) && !(g_inputArtMissing && (art == 0xc9db046b || art == 0xd53a274e));
+}
 static void __stdcall FakeTextKey(uint32_t e, uint32_t key) { Elem(5, e, key, 0, 0); }
 static void __stdcall FakeLoop(uint32_t e, uint32_t s, uint32_t f, uint32_t to, uint32_t, int32_t, uint32_t) { Elem(6, e, s, f, 0); (void)to; }
 static void __stdcall FakePlay(uint32_t e, uint32_t from, uint32_t to, uint32_t, uint32_t) { Elem(7, e, from, to, 0); }
@@ -170,9 +177,11 @@ int main() {
     {  // 1.1: the row's mod icons (the SIGNAL cell): none -> int 0 (the stock bars), else the sprite of tools\mod_icons.py
         uint8_t t[1] = {2};
         uint32_t v[1] = {0};
-        // (tools\mod_icons.py's art names, Egg's state then Metal's: N unused, K same, D other version, X missing)
-        const struct { int mods; uint32_t art; } cases[] = {{0, 0}, {1, 0x8ecec74d /* KN */}, {1 << 2, 0xd3189cdb /* NK */},
-            {1 | 1 << 2, 0x969345e2 /* KK */}, {3 | 2 << 2, 0x599f90ca /* XD */}, {2 | 3 << 2, 0x3d08abc2 /* DX */}, {3 | 3 << 2, 0xd0819a3e /* XX */}};
+        // (tools\mod_icons.py's art names, Egg's state, Metal's, On-Foot Sonic's: N unused, K same, D other version, X missing)
+        const struct { int mods; uint32_t art; } cases[] = {{0, 0}, {1, 0x3682a4e7 /* KNN */}, {1 << 2, 0x7acc7a75 /* NKN */},
+            {1 | 1 << 2, 0x3e47237c /* KKN */}, {3 | 2 << 2, 0x01536e64 /* XDN */}, {2 | 3 << 2, 0xe4bc895c /* DXN */},
+            {3 | 3 << 2, 0x783577d8 /* XXN */}, {1 << 4, 0x6c94c21f /* NNK */}, {3 << 4, 0xdddd670e /* NNX */},
+            {1 | 1 << 2 | 1 << 4, 0x37d3e9bb /* KKK */}, {3 | 3 << 2 | 2 << 4, 0x0d600caa /* XXD */}};
         for (const auto& k : cases) {
             g_fake.rows[0].mods = k.mods;
             d = Call(kNatRowMods, t, v, 1);
@@ -239,13 +248,21 @@ int main() {
         m[1] = 2;
         d = Call(kNatMods, t2, m, 2);
         Check(d.ret == 1 && g_hostMods == 2, "mods: the answers reach the lobby (Egg on, Metal off)");
+        m[1] = 6;
+        d = Call(kNatMods, t2, m, 2);
+        Check(d.ret == 1 && g_hostMods == 6, "mods: On-Foot Sonic's answer reaches the lobby too");
+        m[1] = 2;
+        d = Call(kNatMods, t2, m, 2);
+        m[0] = 4;
+        d = Call(kNatMods, t2, m, 2);
+        Check(d.ret == 0 && g_hostMods == 2, "mods: On-Foot Sonic not installed");
         m[0] = 7;
         d = Call(kNatMods, t2, m, 2);
         Check(d.ret == 0xffffffffu && g_hostMods == 2, "mods: another field changes nothing");
         m[0] = 3;
         g_fake.refusedMods = 3;  // (Egg Hangar not installed here: modset.h kModMissing)
         d = Call(kNatMods, t2, m, 2);
-        Check(d.ret == 11 && g_hostMods == 2, "mods: the refusal pop-up's text for Egg Hangar not installed");
+        Check(d.ret == 35 && g_hostMods == 2, "mods: the refusal pop-up's text for Egg Hangar not installed");
         g_fake.refusedMods = 0;
         d = Call(kNatMods, t2, m, 2);
         Check(d.ret == 0, "mods: no named mod, the plain refusal text");
@@ -485,6 +502,43 @@ int main() {
             memcpy(g_fake.members[2].name, saved, sizeof(saved));
             vt[0] = 1;
         }
+        {   // Majority Drift Parity: the voice node (4e7d2ee9.. per bar) shows the member's device picture unless the member talks
+            // (then the speech bubble 24064704); kMemberTalking then answers 1 so the script shows the node.
+            uint32_t vf[2] = {2, kMemberTalking};
+            vt[0] = 2;
+            const uint32_t node = 0x6c2a3eb0;  // bar 3's voice node
+            g_fake.members[2].input = kInputKeyboard;
+            g_elemCount = 0;
+            Call(kNatMemberText, tt, vt, 2);
+            const ElemCall* art = LastElem(4, node);
+            d = Call(kNatMemberField, t, vf, 2);
+            Check(art && art->a == 0xc9db046b && d.ret == 1, "keyboard: bar 3's voice node shows the keyboard, and is shown");
+            g_fake.members[2].input = kInputController;
+            Call(kNatMemberText, tt, vt, 2);
+            art = LastElem(4, node);
+            d = Call(kNatMemberField, t, vf, 2);
+            Check(art && art->a == 0xd53a274e && d.ret == 1, "controller: the controller picture, shown");
+            g_fake.members[2].talking = 1;
+            Call(kNatMemberText, tt, vt, 2);
+            art = LastElem(4, node);
+            d = Call(kNatMemberField, t, vf, 2);
+            Check(art && art->a == 0x24064704 && d.ret == 1, "talking: the speech bubble, shown");
+            g_fake.members[2].talking = 0;
+            g_fake.members[2].input = kInputUnknown;
+            Call(kNatMemberText, tt, vt, 2);
+            art = LastElem(4, node);
+            d = Call(kNatMemberField, t, vf, 2);
+            Check(art && art->a == 0x24064704 && d.ret == 0, "device unknown (a test player): the bubble back, hidden");
+            g_fake.members[2].input = kInputKeyboard;
+            g_inputArtMissing = true;  // another mod's lobby scene: no pictures, the stock behaviour
+            Call(kNatMemberText, tt, vt, 2);
+            art = LastElem(4, node);
+            d = Call(kNatMemberField, t, vf, 2);
+            Check(art && art->a == 0x24064704 && d.ret == 0, "no pictures in the scene: the bubble, hidden unless talking");
+            g_inputArtMissing = false;
+            g_fake.members[2].input = kInputUnknown;
+            vt[0] = 1;
+        }
         v[0] = 3;
         d = Call(kNatMemberRacer, t, v, 1);
         Check(d.retType == 0, "no fourth member");
@@ -529,7 +583,10 @@ int main() {
         }
         v[0] = 6;
         Check(Call(kNatHostRule, t, v, 1).ret == (uint32_t)-1, "host rule: no such field");
-        g_fake.rules = LobbyRules{25, 0, 8, 4, 2, 2};  // each just past its bound (course 24 is Egg Hangar's)
+        g_fake.rules = LobbyRules{25, 3, 0, 1, 1, 1};  // course 25: RANDOM COURSE (24 is Egg Hangar's): a guest shows it
+        v[0] = 0;
+        Check(Call(kNatHostRule, t, v, 1).ret == 25, "host rule: RANDOM COURSE reaches the guest");
+        g_fake.rules = LobbyRules{26, 0, 8, 4, 2, 2};  // each just past its bound
         for (int i = 0; i < kRuleCount; ++i) {
             v[0] = (uint32_t)i;
             Check(Call(kNatHostRule, t, v, 1).ret == (uint32_t)-1, "host rule: out of range");
@@ -719,6 +776,20 @@ int main() {
         v[11] = 0;
         d = Call(kNatFrame, t, v, 12);
         Check(g_lastKind == kCmdSetLocal && g_lastArgs[0] == 5 && g_lastArgs[1] == 1, "frame: picked: the racer, ready");
+        Check((int32_t)g_lastArgs[2] == -1 && g_lastArgs[3] == 0, "frame: a picked racer: no RANDOM pick");
+        // RANDOM (the picker's row after the last racer): member data racer 99 (every bar's "?") and the hidden pick.
+        v[0] = 25;
+        g_fakeRandomPick = 7;
+        d = Call(kNatFrame, t, v, 12);
+        Check(g_lastKind == kCmdSetLocal && g_lastArgs[0] == 99 && g_lastArgs[1] == 1 && g_lastArgs[2] == 7 && g_lastArgs[3] == 0,
+              "frame: RANDOM: racer 99, ready, its hidden pick");
+        g_fakeRandomPick = 3;
+        d = Call(kNatFrame, t, v, 12);
+        Check(g_lastKind == kCmdSetLocal && g_lastArgs[0] == 99 && g_lastArgs[2] == 3, "frame: a new hidden pick is posted");
+        v[0] = 5;
+        g_fakeRandomPick = -1;
+        d = Call(kNatFrame, t, v, 12);
+        Check(g_lastKind == kCmdSetLocal && g_lastArgs[0] == 5 && (int32_t)g_lastArgs[2] == -1, "frame: back to a racer: no RANDOM pick");
         // The select key (F2, arg 12) without a cursor on another player's bar does nothing here (the script's CHANGE RACER);
         // INVITE FRIENDS is the script's own (kNatInvite). A guest's Enter does nothing.
         uint8_t t13[13];

@@ -24,6 +24,18 @@ POPUP, PORTRAIT, NAME, CONFIRM_STATUS = 0xa653f569, 0x20a43a61, 0x6a53b173, 0x2f
 NAME_SHADOW = 0xfc4d712a
 NAT_RACER_ON = 0x7a28  # (lobby racer index) -> 1 pickable / 0 its mod is off in this lobby (src/natives.h kNatRacerOn)
 ONLINE = False  # build.build(online=True) sets it for stage 5
+# RANDOM (online only; notes/RANDOM-SLOTS.md): one more stop after the last racer, row R = len(ROWS). Its portrait sprite and text key
+# come with our popups scenes (tools/random_art.py); the C++ publishes R as member data "racer" 99 (every bar shows the stock "?").
+RANDOM_PORTRAIT, RANDOM_TEXT = 0x5abe4516, 0x4327702e  # name_hash('steammp_random_portrait'), name_hash('STEAMMP_RANDOM')
+
+
+def rows_total():
+    return len(ROWS) + (1 if ONLINE else 0)
+
+
+def order():
+    """The popup's cycle order: the racer order, then RANDOM (online)."""
+    return list(RACER_ORDER) + ([len(ROWS)] if ONLINE else [])
 CHARSCREEN_SHA = '823579fda776f4bef75a7a169a31feee727e36ca580276689072ec0d5d1a4ce6'
 
 
@@ -58,9 +70,10 @@ def close_popup(c, commit):
 def cycle(c, step, tag):
     # COUNT>0 is an opening invariant, so at most 21 candidates are visited.
     c.label(tag + '_loop')
-    for position,index in enumerate(RACER_ORDER):
+    cycle_order = order()
+    for position,index in enumerate(cycle_order):
         c.get(CANDIDATE).num(index).raw(b'\x4a').branch(tag+'_after_'+str(index))
-        c.assign(CANDIDATE,RACER_ORDER[(position+step)%len(RACER_ORDER)]).branch(tag+'_test',0x15)
+        c.assign(CANDIDATE,cycle_order[(position+step)%len(cycle_order)]).branch(tag+'_test',0x15)
         c.label(tag+'_after_'+str(index))
     c.label(tag + '_test').get(AVAILABLE).get(CANDIDATE).raw(b'\x23').branch(tag + '_loop')
     c.assign(POP_DIRTY, 1)
@@ -75,6 +88,13 @@ def draw_popup(c):
         c.ident(NAME).get(0x13).ident(base.name_hash(identity)).raw(b'\x23').num(2).raw(b'\x23\x3c').native(0x021f, 2)
         c.ident(NAME_SHADOW).get(0x13).ident(base.name_hash(identity)).raw(b'\x23').num(2).raw(b'\x23\x3c').native(0x021f, 2)
         c.label(end)
+    if ONLINE:  # RANDOM: the blue "???" and the word
+        end = 'popup_draw_random'
+        c.get(CANDIDATE).num(len(ROWS)).raw(b'\x4a').branch(end)
+        c.ident(PORTRAIT).ident(RANDOM_PORTRAIT).raw(b'\x3c').native(0x0228, 2)
+        c.ident(NAME).ident(RANDOM_TEXT).raw(b'\x3c').native(0x021f, 2)
+        c.ident(NAME_SHADOW).ident(RANDOM_TEXT).raw(b'\x3c').native(0x021f, 2)
+        c.label(end)
     c.ident(CONFIRM_STATUS).ident(0xfbc94a42).native(0x0215, 2)
     c.assign(POP_DIRTY, 0).branch('all_done', 0x15)
 
@@ -82,9 +102,9 @@ def draw_popup(c):
 def make_chunks(original):
     chunks = base.make_chunks(original)
     chunks[0xf7f].assign(MODE, 0).assign(CANDIDATE, 0).assign(COUNT, 0).assign(SCAN, 0).assign(POP_DIRTY, 0)
-    for _ in ROWS:
+    for _ in range(rows_total()):
         chunks[0xf7f].num(0)
-    chunks[0xf7f].array(len(ROWS)).put(AVAILABLE)
+    chunks[0xf7f].array(rows_total()).put(AVAILABLE)
     # Show/re-entry cannot inherit a stale popup state.
     chunks[0xf95].ident(POPUP).ident(0x36a7542b).native(0x0215,2)
     chunks[0xf95].assign(MODE, 0).assign(POP_DIRTY, 0)
@@ -142,9 +162,9 @@ def make_chunks(original):
     # Array equality supports None in the real type-8 class, but not integer
     # zero. The pinned getter contract is array/None, so do not compare to 0.
     c.label('list_not_null').get(0x14).raw(b'\x1f').num(0).raw(b'\x48').branch('unavailable')
-    for _ in ROWS:
+    for _ in range(rows_total()):
         c.num(0)
-    c.array(len(ROWS)).put(AVAILABLE).assign(COUNT, 0).assign(SCAN, 0)
+    c.array(rows_total()).put(AVAILABLE).assign(COUNT, 0).assign(SCAN, 0)
     c.label('scan_list').get(SCAN).get(0x14).raw(b'\x1f\x46').branch('scan_done')
     for index, (_, identity) in enumerate(ROWS):
         done = 'identity_' + str(index)
@@ -160,10 +180,12 @@ def make_chunks(original):
         c.get(COUNT).num(1).raw(b'\x42').put(COUNT).label(done)
     c.get(SCAN).num(1).raw(b'\x42').put(SCAN).branch('scan_list', 0x15)
     c.label('scan_done').get(COUNT).num(0).raw(b'\x48').branch('unavailable')
+    if ONLINE:  # RANDOM is offered whenever any racer is
+        c.num(1).num(len(ROWS)).raw(b'\x28\x01' + struct.pack('<H', AVAILABLE))
     c.get(base.CHARACTER).put(CANDIDATE)
     c.get(AVAILABLE).get(CANDIDATE).raw(b'\x23').branch('find_first')
     c.branch('open_popup', 0x15)
-    c.label('find_first').assign(CANDIDATE, RACER_ORDER[-1])
+    c.label('find_first').assign(CANDIDATE, order()[-1])
     cycle(c, 1, 'first_available')
     c.label('open_popup').assign(MODE, 1).assign(POP_DIRTY, 1).assign(base.DELAY, 2)
     sound(c, 'FE_SELECT')

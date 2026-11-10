@@ -11,3 +11,7 @@ void ScriptSubstInstall(HMODULE gameImage, const std::wstring& modDir);
 void ScriptSubstRollback();
 // Before the game's first parse: offer the stock 21 racers online, whatever the installed network module lists (modset.h ModLocalOnly).
 void ScriptSubstUseStockRacers();
+// Before the game's first parse: On-Foot Sonic and his add-on are installed; a Metal Sonic package then gets the 23-racer module.
+void ScriptSubstUseOnFootRacers();
+// Whether the lobby's racer list is the 23-racer one with On-Foot Sonic (after the first parse; false before it or without Metal).
+bool ScriptSubstOnFootListed();

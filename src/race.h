@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include "race_wire.h"
 #include "script_abi.h"
+#include "drift_style.h"
 
 // The race bridge (notes/RACE-BRIDGE.md): one race on every PC from the host's contract, held
 // until everyone has loaded, with the other players' cars played back from the network.
@@ -20,11 +21,13 @@ void RaceConfigure(const wchar_t* configIni);
 void RaceUseEggHangar(bool installed);
 // ENABLE MODIFICATIONS (1.1, notes\ENABLE-MODS.md): whether this lobby uses Egg Hangar and Metal Sonic (installed here and named in
 // the lobby's required mods). Off: Egg Hangar's course is neither offered nor raced; Metal Sonic can't be picked and is never an AI racer.
-void RaceLobbyMods(bool eggOn, bool metalOn);
+// On-Foot Sonic likewise (him and his add-on): off = he can't be picked and is never an AI racer.
+void RaceLobbyMods(bool eggOn, bool metalOn, bool onFootOn);
 
 // The racer list the lobby menu uses (index -> character hash): the Roster Pack's 25, the stock 21, or the stock 21 + Metal Sonic
 // (the standalone Metal Sonic 1.1.2). Set by the menu substitution once it knows which module it installed.
-enum RacerListKind { kRacerListStock, kRacerListRoster, kRacerListMetal };
+// (kRacerListMetalOnFoot: those 22 + On-Foot Sonic, when he and his add-on are installed; notes\ONFOOT-ONLINE.md)
+enum RacerListKind { kRacerListStock, kRacerListRoster, kRacerListMetal, kRacerListMetalOnFoot };
 void RaceUseRacerList(RacerListKind kind);
 // The character hash of lobby racer `index` (the list above), or 0 if there is no such racer.
 uint32_t RaceRacerHash(int index);
@@ -85,8 +88,15 @@ enum RaceStartRefusal : int32_t {
     kStartNetNotReady = 10,  // a player's game has no Steam certificate yet (member data "net"): the menu waits
     kStartPlayerInRace = 11, // a player is still in the last race (its results; member data "pos"): refused
     kStartRacerOff = 12,     // a player's racer belongs to a mod that is off in this lobby (RaceRacerOn): the menu says "not ready"
+    kStartRandomPending = 13,  // a RANDOM player's hidden pick isn't settled yet (random_slots.h): the menu retries a few seconds
 };
 int32_t RaceHostStart();
+// RANDOM (notes\RANDOM-SLOTS.md): the lobby's RANDOM COURSE is the course value after the last course; RANDOM racer is the
+// picker's row after the last racer (= RaceRacerCount()).
+constexpr int kCourseRandom = 25;
+int RaceRacerCount();
+struct LobbySnapshot;
+int32_t RaceRandomPick(const LobbySnapshot& s, bool random, bool& dup);  // this game's hidden pick (-1 none), every lobby frame
 // Drift+ off in the next race this lobby starts: a member drives with the keyboard, or the host's [Debug] ForceDriftPlusOff
 // (the rule of src/steer.h; the Settings popup's DRIFT+ row shows it).
 struct LobbySnapshot;

@@ -25,7 +25,7 @@ struct Module {
     size_t size;
     uint8_t* buffer;
 };
-enum { kModMainMenu, kModDialogs, kModNetRoster, kModNetStock, kModResults, kModNetMetal, kModuleCount };
+enum { kModMainMenu, kModDialogs, kModNetRoster, kModNetStock, kModResults, kModNetMetal, kModNetOnFoot, kModuleCount };
 static Module g_modules[kModuleCount] = {
     {kMenu_fe_mainmenu, sizeof(kMenu_fe_mainmenu)},
     {kMenu_dialogs, sizeof(kMenu_dialogs)},
@@ -33,6 +33,7 @@ static Module g_modules[kModuleCount] = {
     {kMenu_fe_network_game_stock, sizeof(kMenu_fe_network_game_stock)},  // the stock 21 racers
     {kMenu_results, sizeof(kMenu_results)},                              // the results screen with the profile cursor (M7)
     {kMenu_fe_network_game_metal, sizeof(kMenu_fe_network_game_metal)},  // the stock 21 + Metal, for the standalone Metal Sonic 1.1.2
+    {kMenu_fe_network_game_onfoot, sizeof(kMenu_fe_network_game_onfoot)},  // those 22 + On-Foot Sonic (his mod and add-on installed)
 };
 
 // An original module the game may load, and the module of ours that replaces it.
@@ -68,6 +69,10 @@ static int g_chosen[kTargetCount] = {-1, -1, -1, -1, -1};  // module index per t
 static bool g_stockRacers = false;  // a racer pack that stays local: online uses the stock list whatever its network module lists
 
 void ScriptSubstUseStockRacers() { g_stockRacers = true; }
+// On-Foot Sonic (notes\ONFOOT-ONLINE.md): his add-on leaves fe_network_game alone, so the Metal module can't tell him apart: the
+// runtime says he and his add-on are installed (before ScriptSubstInstall), and the Metal choice becomes the 23-racer one.
+static bool g_onFootRacers = false;
+void ScriptSubstUseOnFootRacers() { g_onFootRacers = true; }
 
 static bool Sha256Hex(const void* data, size_t n, char out[65]) {
     BCRYPT_ALG_HANDLE alg = nullptr;
@@ -119,6 +124,7 @@ static void __cdecl BeforeParse(uint8_t* pkg) {
                 if (isModule && a.origSha256 && strcmp(sha, a.origSha256) == 0) chosen[t] = a.module;
             // (ours replaces the whole module, so the pack's rows are gone and an update of the pack changes nothing here)
             if (g_stockRacers && isModule && (t == 2 || t == 3)) chosen[t] = kModNetStock;
+            if (g_onFootRacers && (t == 2 || t == 3) && chosen[t] == kModNetMetal) chosen[t] = kModNetOnFoot;
             if (chosen[t] < 0) {
                 Log(true, L"multiplayer menus: off (the installed %hs script is not one this version was built for; sha256 %hs)",
                     g_targets[t].name, isModule ? sha : "not a module");
@@ -134,10 +140,14 @@ static void __cdecl BeforeParse(uint8_t* pkg) {
         Log(true, L"multiplayer menus: using our front-end scripts (fe_mainmenu, dialogs, results, fe_network_game: %s)",
             g_chosen[2] == kModNetRoster ? L"Roster Pack, 25 racers"
             : g_chosen[2] == kModNetMetal ? L"the standalone Metal Sonic (1.1.2 or newer), 22 racers"
+            : g_chosen[2] == kModNetOnFoot ? L"the standalone Metal Sonic and On-Foot Sonic, 23 racers"
                                           : L"stock game, 21 racers");
 #ifndef SCRIPT_SUBST_TEST
         // The race contract maps lobby racer numbers through it.
-        RaceUseRacerList(g_chosen[2] == kModNetRoster ? kRacerListRoster : g_chosen[2] == kModNetMetal ? kRacerListMetal : kRacerListStock);
+        RaceUseRacerList(g_chosen[2] == kModNetRoster    ? kRacerListRoster
+                         : g_chosen[2] == kModNetMetal  ? kRacerListMetal
+                         : g_chosen[2] == kModNetOnFoot ? kRacerListMetalOnFoot
+                                                        : kRacerListStock);
 #endif
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         Log(true, L"multiplayer menus: off (fault while reading the script package)");
@@ -202,7 +212,10 @@ void ScriptSubstTestBeforeParse(uint8_t* pkg) { BeforeParse(pkg); }
 const uint8_t* ScriptSubstTestBuffer(size_t i) { return i < kTargetCount && g_chosen[i] >= 0 ? g_modules[g_chosen[i]].buffer : nullptr; }
 bool ScriptSubstTestIsStock(size_t i) { return i < kTargetCount && g_chosen[i] == kModNetStock; }
 bool ScriptSubstTestIsMetal(size_t i) { return i < kTargetCount && g_chosen[i] == kModNetMetal; }
+bool ScriptSubstTestIsOnFoot(size_t i) { return i < kTargetCount && g_chosen[i] == kModNetOnFoot; }
 #endif
+
+bool ScriptSubstOnFootListed() { return g_chosen[2] == kModNetOnFoot; }
 
 void ScriptSubstInstall(HMODULE gameImage, const std::wstring& modDir) {
     std::wstring ini = modDir + L"\\config.ini";

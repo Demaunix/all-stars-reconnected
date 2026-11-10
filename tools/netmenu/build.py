@@ -91,7 +91,7 @@ def _build(original, stage):
     assert natives <= allowed, sorted(hex(n) for n in natives - allowed)
     targets = {t for c in chunks.values() for _, t in c.calls}
     assert sorted(t for t in targets if not isinstance(t, tuple)) == [0x1118, 0x1a9d, 0x1fdd, 0x203e]
-    assert {t[1] for t in targets if isinstance(t, tuple)} <= ({steam.SHOW_LABEL, steam.DRAW_LABEL, steam.FOOTER_LABEL, steam.REFUSAL_LABEL} if stage is steam else set())
+    assert {t[1] for t in targets if isinstance(t, tuple)} <= ({steam.SHOW_LABEL, steam.DRAW_LABEL, steam.FOOTER_LABEL, steam.REFUSAL_LABEL, steam.MODS_RENDER_LABEL, steam.MODS_MAP_LABEL, steam.MODS_SWITCH_LABEL, steam.MODS_NAMES_LABEL} if stage is steam else set())
     # The only settings native is the read-only course-availability query (command 73).
     for d in raw.values():
         ops = list(instructions(d, 0, len(d), '<'))

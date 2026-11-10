@@ -52,9 +52,10 @@ def keys_stamp():
         s = json.loads((keys / "keys.json").read_text(encoding="utf-8"))
         ok = s["tool_sha256"] == sha(root / "tools" / "footer_keys.py") and all(
             s["inputs"][name] == sha(root / "tools" / name) for name in ("steam_tiles.py", "text_tables.py", "dialog_icons.py", "scene_container.py", "lobby_bars.py",
-                                                                        "egg_lobby.py", "mod_icons.py", "lobby_drift_row.py", "codexui/build_ui.py", "codexui/decode_ui_texture.py", "codexui/probe.py",
-                                                                        "pad_glyphs.py")) and all(
-            s["inputs"][name] == sha(root / name) for name in ("reference/pad-glyphs/cells.json", "reference/pad-glyphs/cells.bin")) and all(
+                                                                        "egg_lobby.py", "mod_icons.py", "lobby_drift_row.py", "lobby_input_icons.py", "codexui/build_ui.py", "codexui/decode_ui_texture.py", "codexui/probe.py",
+                                                                        "pad_glyphs.py", "random_art.py", "onfoot_art.py")) and all(
+            s["inputs"][name] == sha(root / name) for name in ("reference/pad-glyphs/cells.json", "reference/pad-glyphs/cells.bin",
+                                                       "reference/random-art/question-marks-hd.webp", "reference/random-art/course-card-hd.webp")) and all(
             sha(keys / base / Path(op["payload"]).name) == op["payload_sha256"] for base, g in s["bases"].items() for op in g["operations"]) and all(
             base in s["bases"] for base in METALS)
         return s if ok else None

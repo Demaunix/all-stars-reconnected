@@ -30,11 +30,14 @@ SPIN_AGE = 0x5b            # M8: frames the busy spinner has been up (it stays o
 AUTO_HELD = 0x5c           # M8: the racer picker's first opening waits while a race runs here (a mid-race joiner, re\m8-audit A4)
 FLAG_KEY = 0x5d            # M8: show_results: the row's flag sprite as read once (a hash, or int 0)
 # 1.1 ENABLE MODIFICATIONS (notes\ENABLE-MODS.md): the CREATE question's state (0 none; see mods_frame) and its answers so far
-# (1 = on: Metal Sonic, Egg Hangar; first "installed").
+# (1 = on: Metal Sonic, Egg Hangar, On-Foot Sonic; first "installed").
 MODS_STATE, MODS_METAL, MODS_EGG = 0x5e, 0x5f, 0x60
-# The MODIFICATIONS popup (mods_open): its cursor row, its row count, Metal Sonic installed (row 0 is Metal's), our 2 text buffers.
+# The MODIFICATIONS popup (mods_open): its cursor row, its row count, (0x63 unused since On-Foot Sonic), our 3 text buffers.
 MODS_ROW, MODS_ROWS, MODS_HAVE_METAL, MODS_BUFS = 0x61, 0x62, 0x63, 0x64
-GLOBAL_COUNT = 0x65
+# On-Foot Sonic (notes\ONFOOT-ONLINE.md; with his add-on): his answer; and which mod each popup row shows (MOD_* below, -1 none).
+MODS_FOOT = 0x65
+MODS_ROW_MOD = (0x66, 0x67, 0x68)
+GLOBAL_COUNT = 0x69
 RETURNED = 0x22  # stock global: 1 = front_main returned through export 0x45b79703 (notes/RETURN-TO-LOBBY.md)
 
 # src/natives.h
@@ -54,10 +57,10 @@ NAT_MEMBER_ICON = 0x7a1f   # M7: (bar, racer icon) for the lobby's race bar (a r
 NAT_ROW_PROFILE = 0x7a21   # M7: (row) the search row's host in the Steam overlay (the console's VIEW GAMER CARD on F2)
 NAT_ROW_RACING = 0x7a22    # M7: (row) -> 1 while that lobby's race runs: the STATUS column says GAME, else LOBBY
 NAT_ROW_FLAG = 0x7a27      # M8: (row) -> the row host's license flag sprite (a hash), or 0 (src/natives.h kNatRowFlag)
-NAT_MODS = 0x7a29          # 1.1: (field, value): 0/1 Metal Sonic / Egg Hangar installed; 2 the next lobby's mods (src/natives.h kNatMods)
+NAT_MODS = 0x7a29          # 1.1: (field, value): 0/1/4 Metal Sonic / Egg Hangar / On-Foot Sonic installed; 2 the next lobby's mods; 3 the refusal text (src/natives.h kNatMods)
 NAT_ROW_MODS = 0x7a2a      # 1.1: (row) -> the row's mod icons sprite (a hash), or 0 (src/natives.h kNatRowMods)
 NAT_DIALOG_BACK = 0x7a2b   # 1.1: () -> 1: back pressed this frame in the dialog layer (src/natives.h kNatDialogBack)
-SIGNAL_ART = 0xcb541e46    # tools\mod_icons.py SIGNAL_WIDE: the stock signal bars (7bf528a4) right-aligned in the widened cell
+SIGNAL_ART = 0x7307fbe0    # tools\mod_icons.py SIGNAL_WIDE ("STEAMMP_MODS_NNN"): the stock signal bars (7bf528a4) right-aligned in the widened cell
 # The SIGNAL column's header -> "MODS" (the console's TU2 put "DLC" there): its three text nodes and our key in the search scene's
 # text (tools\mod_icons.py HEADER_NODES / HEADER_KEY = path_hash("STEAMMP_MODS_COLUMN")).
 MODS_HEADER_NODES, MODS_HEADER_KEY = (0x8935d3e3, 0x9b3a9173, 0x7791ab5d), 0xfc762fec
@@ -103,7 +106,7 @@ SPIN_MIN = 32  # frames: one turn of the dots
 SHOW_LABEL = 'lobby_show_entry'  # the lobby Show block, a subroutine after the module's code (16-bit jump room)
 DRAW_LABEL = 'lobby_bars_entry'  # the lobby bars, likewise
 FOOTER_LABEL = 'lobby_footer_entry'  # the lobby footer and title, likewise
-REFUSAL_LABEL = 'mods_refusal_entry'  # 1.1: the join refusal pop-up naming the mods (16 texts), likewise
+REFUSAL_LABEL = 'mods_refusal_entry'  # 1.1: the join refusal pop-up naming the mods (52 texts), likewise
 # fe_navigator footer icons (re\m6-lobby\FOOTER-FINDINGS.md): 0 Enter, 1 Esc, 2 F1, 3 F2, 9 the A key (our cap, tools\footer_keys.py);
 # labels from navigator_info: INVITE FRIENDS, SETTINGS, BACK, CHANGE RACER, START RACE, SELECT. The user's layout (2026-10-23): the
 # Mac's lobby (re\m7-flows\FINDINGS.md A: Enter = START, F2 = CHANGE RACER on your own bar / SELECT on another's, F1 = SETTINGS,
@@ -167,15 +170,15 @@ KICK_ASK = 'Are you sure you wish to kick this player from the match?'
 # Host migration (M7): the host left and Steam passed the lobby on; the game goes on with the new host (1P).
 HOST_NOW = 'The host left this game. You are the host now: you choose the settings and start the race.'
 HOST_CHANGED = 'The host left this game. The player with the 1P badge is the host now.'
-# 1.1: the join refusal pop-up (the user, 2026-10-24): each Egg Hangar / Metal Sonic difference on its own line with the game list's
+# 1.1: the join refusal pop-up (the user, 2026-10-24): each Egg Hangar / Metal Sonic / On-Foot Sonic difference on its own line with the game list's
 # mark (tools\dialog_icons.py: U+F001 the red X = not installed, U+F002 the orange dash = another version), then whether other mods
-# differ too. Order: src\modset.h RefusalText (Egg's mark, then Metal's, none / dash / X; each without and with the other mods).
+# differ too. Order: src\modset.h RefusalText (Egg's mark, then Metal's, then On-Foot's, none / dash / X; each without and with the other mods).
 REFUSAL_X, REFUSAL_DASH = '', ''
 
 
-def _refusal(egg, metal, rest):
+def _refusal(egg, metal, foot, rest):
     lines = ["You can't join this game:", '']
-    for name, mark in (('Egg Hangar', egg), ('Metal Sonic', metal)):
+    for name, mark in (('Egg Hangar', egg), ('Metal Sonic', metal), ('On-Foot Sonic', foot)):
         if mark == 1:
             lines.append(REFUSAL_DASH + ' ' + name + ': a different version')
         elif mark == 2:
@@ -185,8 +188,9 @@ def _refusal(egg, metal, rest):
     return '\n'.join(lines)
 
 
-MODS_REFUSALS = [_refusal(e, m, rest) for e in range(3) for m in range(3) if e or m for rest in (0, 1)]
-assert len(MODS_REFUSALS) == 16 and all(len(b.encode('utf-8')) < 300 for b in MODS_REFUSALS)
+# (On-Foot Sonic's mark covers him and his add-on: modset.h OnFootStateFor)
+MODS_REFUSALS = [_refusal(e, m, f, rest) for e in range(3) for m in range(3) for f in range(3) if e or m or f for rest in (0, 1)]
+assert len(MODS_REFUSALS) == 52 and all(len(b.encode('utf-8')) < 300 for b in MODS_REFUSALS)
 for body in [e[1] for e in ERRORS] + [NO_GAMES, OFFLINE, UNKNOWN_ERROR, HOST_NOW, HOST_CHANGED, KICK_ASK, POPUP_TEXT, ALONE_TEXT, NOT_READY_TEXT, LEAVE_TEXT, QUIT_TEXT]:
     assert body.isascii() and len(body) < 160, body
 
@@ -250,7 +254,7 @@ def error_notice(c, tag, end):
 
 
 def mods_refusal(c):
-    """ERR_MODS's notice: the text naming the lobby's Egg Hangar / Metal Sonic differences (MODS_REFUSALS, by RefusalText), else the
+    """ERR_MODS's notice: the text naming the lobby's Egg Hangar / Metal Sonic / On-Foot Sonic differences (MODS_REFUSALS, by RefusalText), else the
     plain one."""
     c.num(3).num(0)
     nat(c, NAT_MODS, 2).put(FLAG_KEY)
@@ -404,9 +408,13 @@ MODS_OPEN, MODS_CLOSING_OK, MODS_CLOSING_BACK = 30, 31, 32  # the popup: open; c
 # one-line bars 2 and 3 (LAPS, PRIVATE SLOTS) relabelled through our two text buffers and put back on close
 # (re\m9-modifications\POPUP-FINDINGS.md); every other bar hidden. Values: the Settings' own ON / OFF keys.
 POPUPS_SCENE, POPUP_HIDDEN, POPUP_OPEN_FROM, POPUP_OPEN_TO, POPUP_CLOSE_FROM = 0x423a1091, 0x36a7542b, 0xb2244a6d, 0x02f0b24c, 0xc1dd7351
-MODS_BARS = settings.BARS[1:3]
-MODS_LABELS = ((0x43f6685c, 0xbec46a65, 0x7ad9ac6c), (0x3a5d4dbc, 0x6c59fcf9, 0x1b897197))  # each bar's two labels, its own text key
-MODS_VALUES = settings.TEXT_PAIRS[1:3]
+MODS_BARS = settings.BARS[1:4]  # (LAPS, PRIVATE SLOTS, AI RACERS: one-line rows)
+MODS_LABELS = ((0x43f6685c, 0xbec46a65, 0x7ad9ac6c), (0x3a5d4dbc, 0x6c59fcf9, 0x1b897197),
+               (0x67b11fcb, 0x19597dd0, 0x4d412cd7))  # each bar's two labels, its own text key (read from popup scene 0F1A9E40's OBJS)
+MODS_VALUES = settings.TEXT_PAIRS[1:4]
+# The popup's mods, in row order (each listed only when installed): its answer's global and its row label.
+MOD_SLOTS = (MODS_METAL, MODS_EGG, MODS_FOOT)
+MOD_NAMES = ('METAL SONIC', 'EGG HANGAR', 'ON-FOOT SONIC')
 TXT_ON, TXT_OFF = 0xffc1df26, 0x724c3b00
 BAR_PLAIN, BAR_LIT = 0x0d09208a, 0xd279b4c1
 
@@ -423,18 +431,32 @@ def mods_on_off(c, key, slot, tag):
     c.label(tag + '_off').ident(key).ident(TXT_OFF).native(0x021f, 2).label(tag + '_done')
 
 
-def mods_row_value(c, key, row, tag):
-    """Row's value text: row 0 is Metal Sonic when installed, else Egg Hangar; row 1 (both installed) Egg Hangar."""
-    if row == 1:
-        return mods_on_off(c, key, MODS_EGG, tag)
-    c.get(MODS_HAVE_METAL).branch(tag + '_egg')
-    mods_on_off(c, key, MODS_METAL, tag + '_metal')
-    c.branch(tag + '_end', 0x15).label(tag + '_egg')
-    mods_on_off(c, key, MODS_EGG, tag + '_egg_value')
+def mods_by_row(c, row, tag, body):
+    """body(c, mod, tag) for the mod popup row `row` shows (MODS_ROW_MOD; nothing when the row shows none)."""
+    for mod in range(len(MOD_SLOTS)):
+        c.get(MODS_ROW_MOD[row]).num(mod).raw(b'\x4a').branch(f'{tag}_not_{mod}')
+        body(c, mod, f'{tag}_{mod}')
+        c.branch(tag + '_end', 0x15).label(f'{tag}_not_{mod}')
     c.label(tag + '_end')
 
 
+def mods_row_value(c, key, row, tag):
+    """Row's value text: the ON / OFF of the mod the row shows."""
+    mods_by_row(c, row, tag, lambda c, mod, t: mods_on_off(c, key, MOD_SLOTS[mod], t))
+
+
+# The popup's big blocks live in subroutines after the module's code (the search frame's chunk is near the 32 KB jump limit):
+# make_chunks sets MODS_END to that chunk's anchor and appends mods_subroutines there.
+MODS_END = None
+MODS_RENDER_LABEL, MODS_MAP_LABEL, MODS_SWITCH_LABEL = 'mods_render_entry', 'mods_map_entry', 'mods_switch_entry'
+MODS_NAMES_LABEL = 'mods_names_entry'
+
+
 def mods_render(c, tag):
+    c.call_chunk(MODS_END, MODS_RENDER_LABEL)
+
+
+def mods_render_body(c, tag):
     for row, bar in enumerate(MODS_BARS):
         c.get(MODS_ROW).num(row).raw(b'\x4a').branch(tag + '_plain_' + str(row))
         c.ident(bar).ident(BAR_LIT).native(0x0215, 2).branch(tag + '_lit_' + str(row), 0x15)
@@ -448,9 +470,9 @@ def mods_buffer(c, row):
 
 
 def mods_open(c):
-    """YES: the popup lists the installed mods, each ON (the host's YES) until changed with Left / Right."""
-    c.get(MODS_METAL).put(MODS_HAVE_METAL)
-    c.get(MODS_METAL).get(MODS_EGG).raw(b'\x42').put(MODS_ROWS)
+    """YES: the popup lists the installed mods (Metal Sonic, Egg Hangar, On-Foot Sonic, in that order), each ON (the host's YES)
+    until changed with Left / Right."""
+    c.call_chunk(MODS_END, MODS_MAP_LABEL)  # (MODS_ROW_MOD, MODS_ROWS)
     c.assign(MODS_ROW, 0)
     c.ident(POPUPS_SCENE).native(0x0205, 1)
     c.ident(racer.POPUP).ident(POPUP_HIDDEN).native(0x0215, 2)
@@ -458,19 +480,11 @@ def mods_open(c):
     for bar in settings.BARS:
         c.ident(bar).native(0x0218, 1)
     c.ident(MODS_BARS[0]).native(0x0217, 1)
-    c.get(MODS_ROWS).num(1).raw(b'\x48').branch('mods_open_one_row')
-    c.ident(MODS_BARS[1]).native(0x0217, 1)
-    c.label('mods_open_one_row')
-    for row, (a, b, _) in enumerate(MODS_LABELS):
-        for key in (a, b):
-            c.ident(key)
-            mods_buffer(c, row).native(0x021e, 2)
-    c.get(MODS_HAVE_METAL).branch('mods_open_egg_first')
-    mods_buffer(c, 0).string('METAL SONIC').native(0x1613, 2)
-    c.branch('mods_open_labels', 0x15).label('mods_open_egg_first')
-    mods_buffer(c, 0).string('EGG HANGAR').native(0x1613, 2)
-    c.label('mods_open_labels')
-    mods_buffer(c, 1).string('EGG HANGAR').native(0x1613, 2)
+    for row in range(1, len(MODS_BARS)):  # (bar N shows when there are more than N rows)
+        c.get(MODS_ROWS).num(row).raw(b'\x48').branch(f'mods_open_rows_{row}')
+        c.ident(MODS_BARS[row]).native(0x0217, 1)
+        c.label(f'mods_open_rows_{row}')
+    c.call_chunk(MODS_END, MODS_NAMES_LABEL)  # (each row's label: its mod's name)
     mods_render(c, 'mods_open_render')
     racer.sound(c, 'FE_SELECT')
     c.ident(settings.SETTINGS).ident(POPUP_OPEN_FROM).ident(POPUP_OPEN_TO).num(0).native(0x020e, 4)
@@ -502,12 +516,8 @@ def mods_popup_frame(c):
     c.label('mods_no_down').native(0x0423, 0, drop=False).branch('mods_no_left')
     c.branch('mods_switch', 0x15)
     c.label('mods_no_left').native(0x0424, 0, drop=False).branch('search_done')
-    c.label('mods_switch')  # (left or right: one switch between ON and OFF)
-    c.get(MODS_ROW).num(1).raw(b'\x4a').branch('mods_switch_first')
-    c.num(1).get(MODS_EGG).raw(b'\x43').put(MODS_EGG).branch('mods_changed', 0x15)
-    c.label('mods_switch_first').get(MODS_HAVE_METAL).branch('mods_switch_egg')
-    c.num(1).get(MODS_METAL).raw(b'\x43').put(MODS_METAL).branch('mods_changed', 0x15)
-    c.label('mods_switch_egg').num(1).get(MODS_EGG).raw(b'\x43').put(MODS_EGG)
+    c.label('mods_switch')  # (left or right: one switch between ON and OFF, of the mod the cursor's row shows)
+    c.call_chunk(MODS_END, MODS_SWITCH_LABEL)
     c.label('mods_changed')
     racer.sound(c, 'FE_MOVE')
     mods_render(c, 'mods_changed_render')
@@ -529,13 +539,50 @@ def mods_popup_frame(c):
     c.label('mods_not_popup')
 
 
+def mods_subroutines(c):
+    """The popup's subroutines (each ends RETURN): the row map and labels, the render, the switch."""
+    c.label(MODS_MAP_LABEL)
+    for slot in MODS_ROW_MOD:
+        c.assign(slot, -1)
+    for mod, have in enumerate(MOD_SLOTS):  # (rows in order: each installed mod takes the first free row)
+        c.get(have).branch(f'mods_map_{mod}_end')
+        for row, slot in enumerate(MODS_ROW_MOD):
+            c.get(slot).num(-1).raw(b'\x4a').branch(f'mods_map_{mod}_not_{row}')
+            c.assign(slot, mod).branch(f'mods_map_{mod}_end', 0x15).label(f'mods_map_{mod}_not_{row}')
+        c.label(f'mods_map_{mod}_end')
+    c.get(MODS_METAL).get(MODS_EGG).raw(b'\x42').get(MODS_FOOT).raw(b'\x42').put(MODS_ROWS)
+    c.raw(b'\x17\x1b')
+    # (the labels only once the popups scene is attached: before it, 021e finds no element and the bars keep the Settings' own
+    # labels, as the first in-game look of 1.2.1-of1 showed)
+    c.label(MODS_NAMES_LABEL)
+    for row, (a, b, _) in enumerate(MODS_LABELS):
+        for key in (a, b):
+            c.ident(key)
+            mods_buffer(c, row).native(0x021e, 2)
+        mods_by_row(c, row, f'mods_map_label_{row}',
+                    lambda c, mod, t, row=row: mods_buffer(c, row).string(MOD_NAMES[mod]).native(0x1613, 2))
+    c.raw(b'\x17\x1b')
+    c.label(MODS_RENDER_LABEL)
+    mods_render_body(c, 'mods_sub_render')
+    c.raw(b'\x17\x1b')
+    c.label(MODS_SWITCH_LABEL)
+    for row in range(len(MODS_BARS)):
+        c.get(MODS_ROW).num(row).raw(b'\x4a').branch(f'mods_sub_switch_not_{row}')
+        mods_by_row(c, row, f'mods_sub_switch_{row}', lambda c, mod, t: c.num(1).get(MOD_SLOTS[mod]).raw(b'\x43').put(MOD_SLOTS[mod]))
+        c.branch('mods_sub_switch_done', 0x15).label(f'mods_sub_switch_not_{row}')
+    c.label('mods_sub_switch_done')
+    c.raw(b'\x17\x1b')
+
+
 def create_request(c, tag):
     """CREATE on the search screen: the question when a toggleable mod is installed, else straight to the lobby (as 1.0.0)."""
     c.num(0).num(0)
     nat(c, NAT_MODS, 2).put(MODS_METAL)
     c.num(1).num(0)
     nat(c, NAT_MODS, 2).put(MODS_EGG)
-    c.get(MODS_METAL).get(MODS_EGG).raw(b'\x42').num(0).raw(b'\x48').branch(tag + '_plain')
+    c.num(4).num(0)
+    nat(c, NAT_MODS, 2).put(MODS_FOOT)  # (On-Foot Sonic with his add-on)
+    c.get(MODS_METAL).get(MODS_EGG).raw(b'\x42').get(MODS_FOOT).raw(b'\x42').num(0).raw(b'\x48').branch(tag + '_plain')
     mods_ask(c, MODS_QUESTION, MODS_ASKED)
     c.label(tag + '_plain')
     c.branch('mods_create', 0x15)
@@ -552,12 +599,15 @@ def mods_frame(c):
     c.assign(MODS_STATE, 0).assign(ACTION, -2).branch('search_done', 0x15)
     c.label('mods_not_closed')
     c.get(MODS_STATE).num(MODS_ASKED + 1).raw(b'\x4a').branch('mods_not_no')
-    c.assign(MODS_METAL, 0).assign(MODS_EGG, 0).branch('mods_create', 0x15)  # NO: every modification off
+    c.assign(MODS_METAL, 0).assign(MODS_EGG, 0).assign(MODS_FOOT, 0).branch('mods_create', 0x15)  # NO: every modification off
     c.label('mods_not_no').get(MODS_STATE).num(MODS_ASKED + 2).raw(b'\x4a').branch('mods_not_yes')
     mods_open(c)  # YES
     c.label('mods_not_yes').assign(MODS_STATE, 0).assign(ACTION, -2).branch('search_done', 0x15)  # (no other state: as closed)
     # The answers go to the lobby about to be created (lobby data "mods" leaves the off ones out), then CREATE as before.
+    # (the answers' bits: Metal 1, Egg 2, On-Foot 4; natives.cpp kNatMods field 2)
     c.label('mods_create').num(2).get(MODS_METAL).get(MODS_EGG).raw(b'\x42').get(MODS_EGG).raw(b'\x42')
+    for _ in range(4):
+        c.get(MODS_FOOT).raw(b'\x42')
     nat(c, NAT_MODS, 2, drop=True)
     c.assign(MODS_STATE, 0)
     host_and_enter(c)
@@ -976,11 +1026,12 @@ def make_chunks(original):
     for slot, value in ((FLOW, 0), (ACTION, -1), (AUTO_CREATE, 0), (CREATING, 0), (CREATE_RESULT, 0),
                         (SEL, 0), (PREV, 0), (ROW_COUNT, 0), (LOBBY_REV, -1), (MEMBERS, 0), (LAST_ERROR, 0), (START_RESULT, 0), (HILITE, -1), (WANT, -1), (RACER_KEY, 0),
                         (LAST_HOST_CHANGE, 0), (CURSOR, -1), (POPUP_STATE, 0), (ERR_MAIN, 0), (ME_LAST, -1), (WAITING, 0), (SPIN_AGE, 0), (AUTO_HELD, 0), (FLAG_KEY, 0),
-                        (MODS_STATE, 0), (MODS_METAL, 0), (MODS_EGG, 0), (MODS_ROW, 0), (MODS_ROWS, 0), (MODS_HAVE_METAL, 0)):
+                        (MODS_STATE, 0), (MODS_METAL, 0), (MODS_EGG, 0), (MODS_ROW, 0), (MODS_ROWS, 0), (MODS_HAVE_METAL, 0),
+                        (MODS_FOOT, 0)) + tuple((slot, -1) for slot in MODS_ROW_MOD):
         chunks[0xf7f].assign(slot, value)
-    for _ in range(2):  # the MODIFICATIONS popup's row labels (as Preview2's buffers)
+    for _ in range(len(MODS_BARS)):  # the MODIFICATIONS popup's row labels (as Preview2's buffers)
         chunks[0xf7f].raw(b'\x55\x60').native(0x1610, 1, drop=False)
-    chunks[0xf7f].array(2).put(MODS_BUFS)
+    chunks[0xf7f].array(len(MODS_BARS)).put(MODS_BUFS)
     initial = Code()
     search.search_show(initial, 'initial')  # ends with ACTION = -2: search once the screen is ready
     # front_main came back from an online race through export 0x45b79703 (g22 = 1; the lobby Show
@@ -996,6 +1047,8 @@ def make_chunks(original):
     struct.pack_into('<H', inherited.data, at + 2, LOBBY_SETTINGS_KEY)
     search.insert_fragment(inherited, ops[1]['end'], nat(Code(), NAT_IS_HOST).branch('settings_run_racer'))
     end = base.u32(original, 12) + base.u32(original, 16)  # the subroutines' chunk: after the module's code
+    global MODS_END
+    MODS_END = end
 
     c = Code().get(FLOW).branch('search_active')
     # ---- lobby
@@ -1287,7 +1340,9 @@ def make_chunks(original):
     callback.raw(b'\x17\x1b')
     callback.label(REFUSAL_LABEL)
     mods_refusal(callback)
-    callback.raw(b'\x17\x1b').label('callback_after')
+    callback.raw(b'\x17\x1b')
+    mods_subroutines(callback)
+    callback.label('callback_after')
     chunks[end] = callback
     return chunks, dict(callback_original_anchor=end, callback_relative_entry=callback.labels['callback_entry'],
                         inherited_settings_details=detail)

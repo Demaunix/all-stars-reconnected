@@ -24,6 +24,8 @@
 //                              whose own lines for that racer are muted, say it too (re\m7-vo-triggers)
 //   ItemLine  guest -> host    the sender's car took a hit its own game saw (a spin, or an All-Star's touch, with
 //                              the All-Star user): the host's announcer calls it (re\m7-item-lines)
+//   Look      owner -> each    another mod's picture of a car the sender owns (its player's, or the host's AI): an opaque
+//                              blob OnFootSonic.dll makes for On-Foot Sonic (notes\ONFOOT-ONLINE.md); the receivers hand it back
 // (IntroVote is no longer sent: since 0.7.0-m7z each screen skips its own intros.)
 #include <math.h>
 #include <stddef.h>
@@ -32,14 +34,15 @@
 
 constexpr int kRaceChannel = 1;
 constexpr uint32_t kWireMagic = 0x31525341;  // bytes "ASR1"
-constexpr uint8_t kWireVersion = 12;         // 2: Pose carries the nav path; Finished. 3: Cars, Results, contract flags. 4: Event. 5: exhaust fx. 6: reactions. 7: IntroVote, 8 humans. 8: Announce. 9: Voice. 10: ItemLine, the All-Star weapon in the phase. 11: the gate All-Stars' shots. 12: kContractNoDriftPlus
+constexpr uint8_t kWireVersion = 14;         // 2: Pose carries the nav path; Finished. 3: Cars, Results, contract flags. 4: Event. 5: exhaust fx. 6: reactions. 7: IntroVote, 8 humans. 8: Announce. 9: Voice. 10: ItemLine, the All-Star weapon in the phase. 11: the gate All-Stars' shots. 12: kContractNoDriftPlus. 13: the drift style flags (Majority Drift Parity; since 1.2.1-kd1 never set, decode only). 14: Look
 constexpr int kMaxHumans = 8;                // = the lobby size (kMaxMembers, lobby.h): the console's 8 seats
 constexpr int kGridSlots = 8;                // a single race always has 8 racers
 constexpr int kMaxCars = kGridSlots - 1;     // the host's cars in one Cars message (never all 8: 2+ humans)
 constexpr size_t kWireMax = 416;             // the largest message (Cars with 7 cars) fits
 
 enum WireType : uint8_t { kMsgContract = 1, kMsgLoaded = 2, kMsgGo = 3, kMsgPose = 4, kMsgAbort = 5, kMsgFinished = 6, kMsgCars = 7, kMsgResults = 8,
-                          kMsgEvent = 9, kMsgIntroVote = 10, kMsgAnnounce = 11, kMsgWrongWay = 12, kMsgVoice = 13, kMsgItemLine = 14 };
+                          kMsgEvent = 9, kMsgIntroVote = 10, kMsgAnnounce = 11, kMsgWrongWay = 12, kMsgVoice = 13, kMsgItemLine = 14,
+                          kMsgLook = 15 };
 
 // Contract flags.
 enum ContractFlags : uint8_t {
@@ -47,6 +50,8 @@ enum ContractFlags : uint8_t {
     kContractItems = 2,   // item events are mirrored: each car's owner decides its items (needs kContractHostAi)
     kContractAnnouncer = 4,  // the host's announcer speaks for every screen (Announce; the guests mute their own)
     kContractNoDriftPlus = 8,  // a keyboard player races: each controller steers with its stick OR its d-pad, never their sum (re\drift-plus)
+    kContractDriftKeyboard = 16,    // legacy (Majority Drift Parity, removed in 1.2.1-kd1): decoded, never set or acted on
+    kContractDriftController = 32,  // ... controller-style (never both)
 };
 
 enum AbortReason : uint8_t {
@@ -265,6 +270,8 @@ constexpr uint16_t kIntroVoteSize = (uint16_t)(kHeader + 1);
 constexpr uint16_t kAnnounceSize = (uint16_t)(kHeader + 4 + 4 + 4 + 4 + 1);
 constexpr uint16_t kVoiceSize = (uint16_t)(kHeader + 1 + 1 + 1 + 2);
 constexpr uint16_t kItemLineSize = (uint16_t)(kHeader + 1 + 1 + 1);
+constexpr uint8_t kLookMax = 24;  // (the blob's bytes; shorter blobs are padded with zeros)
+constexpr uint16_t kLookSize = (uint16_t)(kHeader + 1 + 1 + 4 + kLookMax);
 constexpr uint16_t kFinishedSize = (uint16_t)(kHeader + 1 + 1 + 4 + 4);
 constexpr uint16_t kCarSize = (uint16_t)(1 + 1 + 13 * 4 + 2);  // one Cars entry: slot, flags, pose, nav
 constexpr uint16_t CarsSize(int count) { return (uint16_t)(kHeader + 4 + 1 + count * kCarSize); }
@@ -289,7 +296,8 @@ inline bool WirePeek(const void* data, size_t size, WireType& type, uint32_t& ra
 // the on/off rules 0/1, AI setting 0..3, known flags only.
 inline bool ContractValid(const RaceContract& c) {
     if (!c.race || c.humanCount < 2 || c.humanCount > kMaxHumans) return false;
-    if (c.laps < 1 || c.laps > 9 || c.items > 1 || c.catchup > 1 || c.ai > 3 || (c.flags & ~(kContractHostAi | kContractItems | kContractAnnouncer | kContractNoDriftPlus))) return false;
+    if (c.laps < 1 || c.laps > 9 || c.items > 1 || c.catchup > 1 || c.ai > 3 || (c.flags & ~(kContractHostAi | kContractItems | kContractAnnouncer | kContractNoDriftPlus | kContractDriftKeyboard | kContractDriftController))) return false;
+    if ((c.flags & kContractDriftKeyboard) && (c.flags & kContractDriftController)) return false;
     if ((c.flags & kContractItems) && !(c.flags & kContractHostAi)) return false;  // item owners need one owner for the AI
     for (int i = 0; i < kMaxHumans; ++i) {
         if (i >= c.humanCount) { if (c.humans[i]) return false; continue; }
@@ -474,6 +482,45 @@ inline size_t EncodeItemLine(const RaceItemLine& l, void* out, size_t cap) {
     w.U8(l.slot);
     w.U8(l.other);
     return w.ok ? w.n : 0;
+}
+
+// ---------------------------------------------------------------- Look
+// Another mod's picture of car `slot` at the sender's sim tick (notes\ONFOOT-ONLINE.md: OnFootSonic.dll's blob for On-Foot Sonic,
+// its first byte the blob's version). Opaque here: 1..kLookMax bytes, the rest of the field zero.
+struct RaceLook {
+    uint32_t race;
+    uint8_t slot, len;
+    uint32_t tick;
+    uint8_t data[wire::kLookMax];
+};
+
+inline bool LookValid(const RaceLook& l) {
+    if (!l.race || l.slot >= kGridSlots || l.len < 1 || l.len > wire::kLookMax) return false;
+    for (int i = l.len; i < wire::kLookMax; ++i)
+        if (l.data[i]) return false;
+    return true;
+}
+
+inline size_t EncodeLook(const RaceLook& l, void* out, size_t cap) {
+    if (!LookValid(l)) return 0;
+    wire::Writer w{(uint8_t*)out, cap, 0, true};
+    wire::Header(w, kMsgLook, wire::kLookSize, l.race);
+    w.U8(l.slot);
+    w.U8(l.len);
+    w.U32(l.tick);
+    for (uint8_t b : l.data) w.U8(b);
+    return w.ok && w.n == wire::kLookSize ? w.n : 0;
+}
+
+inline bool DecodeLook(const void* data, size_t size, RaceLook& l) {
+    l = RaceLook{};
+    wire::Reader r{(const uint8_t*)data, size, 0, true};
+    if (!wire::Open(r, kMsgLook, wire::kLookSize, l.race)) return false;
+    l.slot = r.U8();
+    l.len = r.U8();
+    l.tick = r.U32();
+    for (uint8_t& b : l.data) b = r.U8();
+    return r.ok && r.n == size && LookValid(l);
 }
 
 inline bool DecodeItemLine(const void* data, size_t size, RaceItemLine& l) {

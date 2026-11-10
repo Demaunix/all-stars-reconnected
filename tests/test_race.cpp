@@ -10,6 +10,7 @@
 #include <vector>
 #include "lobby.h"
 #include "race.h"
+#include "random_slots.h"
 #include "race_tables.h"
 #include "script_abi.h"
 
@@ -457,6 +458,28 @@ static RaceContract TestHostStart() {
     g_snap.members[0].place = 0;  // (the host's own "pos" doesn't count; the guest is back)
     g_snap.members[1].place = -1;
     CHECK(RaceHostStart() == kStartOk);
+    // RANDOM (random_slots.h): a RANDOM player races its own game's hidden pick; an unsettled pick waits; RANDOM COURSE: the host
+    // rolls a real course (Egg Hangar only where installed).
+    Reset();
+    Lobby(A, true, 0, kRacerRandom);
+    g_snap.members[1].random = -1;
+    CHECK(RaceHostStart() == kStartRandomPending);
+    g_snap.members[1].random = 0;  // the host's own racer: still colliding (its re-roll in flight)
+    CHECK(RaceHostStart() == kStartRandomPending);
+    g_snap.members[1].random = 3;
+    g_snap.rules.course = kCourseRandom;
+    for (int round = 0; round < 20; ++round) {
+        Reset();
+        CHECK(RaceHostStart() == kStartOk);
+        RaceContract rc = {};
+        CHECK(!g_sent.empty() && DecodeContract(g_sent.back().data, g_sent.back().size, rc));
+        CHECK(rc.roster[1] == kRacersRoster[3].hash && rc.roster[0] == kRacersRoster[0].hash);
+        CHECK(rc.course < kCourseRandom && rc.courseHash == kCourses[rc.course].hash && kCourses[rc.course].hash != 0x2c0dae1fu);
+    }
+    Reset();
+    Lobby(A, true, 0, 1);
+    g_snap.rules.course = kCourseRandom + 1;  // past RANDOM COURSE: refused
+    CHECK(RaceHostStart() == kStartNoRules);
     Reset();
     Lobby(A, true, 0, 1);
     g_snap.memberCount = 1;
@@ -1377,7 +1400,7 @@ static void TestEggCourse() {
     }
     // 1.1 ENABLE MODIFICATIONS: installed but off in this lobby = not offered; Metal Sonic off = not pickable.
     RaceUseEggHangar(true);
-    RaceLobbyMods(false, false);
+    RaceLobbyMods(false, false, true);
     uint32_t v[2] = {73, egg};
     NativeCall d = {0x2003, 1, {}, t, v, 2, 0, 0};
     NHook(kH2003)(&vm, &d);
@@ -1389,7 +1412,7 @@ static void TestEggCourse() {
     CHECK(metal >= 0 && !RaceRacerOn(metal) && RaceRacerOn(0));
     int taken[1] = {0};
     for (int n = 0; n < 25; ++n) CHECK(RaceTestPlayerRacer(n, taken, 1) != metal);
-    RaceLobbyMods(true, true);
+    RaceLobbyMods(true, true, true);
     CHECK(RaceRacerOn(metal));
     // The standalone Metal Sonic 1.1.2: the stock 21 + Metal (22nd); the same on / off rule.
     RaceUseRacerList(kRacerListMetal);
@@ -1400,10 +1423,23 @@ static void TestEggCourse() {
     RaceUseRacerList(kRacerListStock);
     CHECK(RaceRacerHash(20) == 0x04f8af71 && !RaceRacerOn(20) && RaceRacerOn(19));
     RaceUseRacerList(kRacerListMetal);
-    RaceLobbyMods(true, false);
+    RaceLobbyMods(true, false, true);
     CHECK(!RaceRacerOn(21) && RaceRacerOn(20));
     for (int n = 0; n < 25; ++n) CHECK(RaceTestPlayerRacer(n, taken, 1) != 21);
-    RaceLobbyMods(true, true);
+    RaceLobbyMods(true, true, true);
+    // On-Foot Sonic (notes\ONFOOT-ONLINE.md): Metal's 22 + him (23rd); off in a lobby = not pickable and never an AI racer.
+    RaceUseRacerList(kRacerListMetalOnFoot);
+    CHECK(RaceRacerHash(21) == 0x9cabac57 && RaceRacerHash(22) == 0xfecc613a && RaceRacerHash(23) == 0);
+    CHECK(RaceRacerHash(0) == kRacersStock[0].hash && RaceRacerOn(22) && RaceRacerOn(21) && RaceRacerOn(20));
+    RaceLobbyMods(true, true, false);
+    CHECK(!RaceRacerOn(22) && RaceRacerOn(21));
+    for (int n = 0; n < 25; ++n) CHECK(RaceTestPlayerRacer(n, taken, 1) != 22);
+    RaceLobbyMods(true, false, true);
+    CHECK(RaceRacerOn(22) && !RaceRacerOn(21));
+    RaceLobbyMods(true, true, true);
+    bool onFootPicked = false;  // (on: the AI pool may take him, the user's answer)
+    for (int n = 0; n < 200 && !onFootPicked; ++n) onFootPicked = RaceTestPlayerRacer(n, taken, 1) == 22;
+    CHECK(onFootPicked);
     RaceUseRacerList(kRacerListRoster);
     NativeCall e = {0x2003, 1, {}, t, v, 2, 0, 0};
     NHook(kH2003)(&vm, &e);
@@ -2094,6 +2130,26 @@ static void TestDriftPlusFlag() {
         RaceContract c = {};
         CHECK(DecodeContract(g_sent[0].data, g_sent[0].size, c));
         CHECK(((c.flags & kContractNoDriftPlus) != 0) == (t == 1 || t == 2));
+        RaceCancel(kAbortQuit);
+    }
+}
+
+// Majority Drift Parity is gone (replaced by the keyboard drift fix, drift_style.h): the host's Start never puts a drift release
+// style in the contract, whatever the players' devices (the flags stay decodable for older hosts' contracts).
+static void TestDriftStyleFlag() {
+    printf("drift release style: the host's Start never sets one\n");
+    struct { int32_t host, guest; uint8_t flags; } cases[] = {
+        {kInputKeyboard, kInputController, 0}, {kInputController, kInputKeyboard, 0}, {kInputKeyboard, kInputKeyboard, 0},
+        {kInputController, kInputController, 0}, {kInputUnknown, kInputKeyboard, 0}, {kInputUnknown, kInputUnknown, 0}};
+    for (auto& t : cases) {
+        Reset();
+        Lobby(A, true, 0, 1);
+        g_snap.members[0].input = t.host;
+        g_snap.members[1].input = t.guest;
+        CHECK(RaceHostStart() == kStartOk);
+        RaceContract c = {};
+        CHECK(DecodeContract(g_sent[0].data, g_sent[0].size, c));
+        CHECK((c.flags & (kContractDriftKeyboard | kContractDriftController)) == t.flags);
         RaceCancel(kAbortQuit);
     }
 }
@@ -7114,6 +7170,50 @@ static void TestRealTimeClock() {
     Frame(20, kHRacing);
     CHECK(g_raceClock == 6 + 1);
     NHook(kH090a)(nullptr, &td);
+
+    // A guest whose game was busy when the host's Go came (race 6bd925b4: the Go waited 3.96 s for a long frame, so that
+    // PC's countdown and race clock started that much after everyone else's). The wait counts, less the sim window of the
+    // frame that took the Go; the long frame's own drop isn't counted twice.
+    for (int late = 0; late < 2; ++late) {
+        Reset();
+        g_stepAcc = 0;
+        Lobby(A, true, 0, 1);
+        CHECK(RaceHostStart() == kStartOk);
+        CHECK(DecodeContract(g_sent[0].data, g_sent[0].size, c));
+        Reset();
+        g_stepAcc = 0;
+        Lobby(B, false, 0, 1);
+        Deliver(A, buf, EncodeContract(c, buf, sizeof(buf)));
+        CHECK(RaceMenuPoll() == kRaceStart);
+        RaceLaunched(true);
+        Script0905(0x1, "STATE_Control_StartingGridAI", 0);
+        Script0905(c.roster[1], "STATE_Control_StartingGridHuman", 2);
+        for (int k = 2; k < 8; ++k) Script0905(0x2, "STATE_Control_StartingGridAI", 0);
+        UHook(kHSetup)(nullptr, nullptr);
+        g_scene[0x1100] = 8;
+        UHook(kHWaiting)(nullptr, nullptr);
+        Deliver(A, buf, EncodeGo(c.race, kStageLoaded, buf, sizeof(buf)));
+        UHook(kHWaiting)(nullptr, nullptr);
+        for (int i = 0; i < 5; ++i) Frame(20, kHCountdown);
+        CHECK(RaceTestPhase() == kHoldB);
+        Deliver(A, buf, EncodeGo(c.race, kStageCountdown, buf, sizeof(buf)));
+        int logs = g_logCount;
+        if (late) {
+            g_inbox.back().arrived = (GetTickCount() - 3000) | 1;  // taken from Steam 3 s ago, during the long frame below
+            Frame(3000, kHCountdown);                               // 150 due, 4 run (the countdown's first 80 ms)
+        } else {
+            g_inbox.back().arrived = GetTickCount() | 1;  // on time: nothing added
+            Frame(20, kHCountdown);
+        }
+        CHECK(RaceTestPhase() == kRunning);
+        CHECK(g_logCount == logs + 2 + late);  // "the host released hold 2", "countdown released", and the wait's line
+        for (int i = 0; i < 20; ++i) Frame(20, kHCountdown);
+        g_raceClock = 0;
+        Frame(20, kHRacing);
+        if (late) CHECK(g_raceClock >= 145 + 1 && g_raceClock <= 148 + 1);  // 3000 - 80 ms (GetTickCount's ~16 ms steps)
+        else CHECK(g_raceClock == 1);
+        NHook(kH090a)(nullptr, &td);
+    }
     g_raceClock = keep;
 }
 
@@ -7265,6 +7365,7 @@ int main(int argc, char** argv) {
     TestHostAiGuest();
     TestExhaust();
     TestDriftPlusFlag();
+    TestDriftStyleFlag();
     TestHostAiHost();
     TestHostAiResults();
     TestHostAiHandBack();

@@ -23,7 +23,9 @@ void ScriptSubstTestBeforeParse(uint8_t* pkg);
 const uint8_t* ScriptSubstTestBuffer(size_t i);
 bool ScriptSubstTestIsStock(size_t i);
 bool ScriptSubstTestIsMetal(size_t i);
+bool ScriptSubstTestIsOnFoot(size_t i);
 void ScriptSubstUseStockRacers();
+void ScriptSubstUseOnFootRacers();
 
 static std::vector<std::wstring> g_log;
 void Log(bool, const wchar_t* fmt, ...) {
@@ -70,11 +72,15 @@ int main(int argc, char** argv) {
     // A racer pack that stays local: the stock network module, also when an update of the pack changed its own (localother).
     const bool localOther = strcmp(argv[1], "localother") == 0;
     const bool local = localOther || strcmp(argv[1], "local") == 0;
-    const bool stock = local || strcmp(argv[1], "stock") == 0;
+    // On-Foot Sonic and his add-on installed: Metal's package gets the 23-racer module (onfoot); the stock one stays stock (onfootstock).
+    const bool onFootStock = strcmp(argv[1], "onfootstock") == 0;
+    const bool onFoot = strcmp(argv[1], "onfoot") == 0;
+    const bool stock = local || onFootStock || strcmp(argv[1], "stock") == 0;
     const bool metal = strcmp(argv[1], "metal") == 0;  // the standalone Metal Sonic 1.1.2's package
-    const bool pack = stock || metal || strcmp(argv[1], "pack") == 0;  // "pack": substitution expected
+    const bool pack = stock || metal || onFoot || strcmp(argv[1], "pack") == 0;  // "pack": substitution expected
     CHECK(ScriptSubstTestPrepare());
     if (local) ScriptSubstUseStockRacers();
+    if (onFoot || onFootStock) ScriptSubstUseOnFootRacers();
     std::vector<uint8_t> pkg = ReadAll(argv[2]);
     if (!pack || localOther) {  // corrupt one code byte of fe_network_game (entry hash 8398d0bc)
         for (uint32_t i = 0; i < U32(pkg.data() + 12); ++i) {
@@ -109,6 +115,7 @@ int main(int argc, char** argv) {
     CHECK(pack ? ScriptSubstTestBuffer(2) == ScriptSubstTestBuffer(3) : true);  // the alias shares one buffer
     if (pack) CHECK(ScriptSubstTestIsStock(2) == stock && ScriptSubstTestIsStock(3) == stock);
     if (pack) CHECK(ScriptSubstTestIsMetal(2) == metal && ScriptSubstTestIsMetal(3) == metal);
+    if (pack) CHECK(ScriptSubstTestIsOnFoot(2) == onFoot && ScriptSubstTestIsOnFoot(3) == onFoot);
     if (!pack) CHECK(!g_log.empty() && g_log.back().find(L"not one this version was built for") != std::wstring::npos);
     printf("script substitution test (%s): %s\n", argv[1], g_fail ? "FAIL" : "PASS");
     return g_fail;
