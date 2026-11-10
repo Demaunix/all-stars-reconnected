@@ -43,6 +43,9 @@ const OnFootBuildPair kOnFootBuilds[] = {
     // (2026-11-10: the same + the add-on starter, A:\ASR-OnFoot-Visuals runtime-src\addon_loader.hpp: the merged folder)
     {"ba27ca3cd57202524ffd594e0f88fc81b3178374fe68f64ae852cdfd11b96bc9",
      "70641c60ef3a4afc9a4ab19984cf211f42f0c60690d2421cc77ff77499c1bb9f", true},
+    // (2026-11-10, 1.2.2: the same + add-on 1.0.2, his save record by the shared extra-racer rule; A:\ASR-OnFoot-Visuals 5f86ad8)
+    {"b2d4c7a9046eeed6c6ae309ca4a7c947055ea656e28661b070d930b34411ce90",
+     "8c1f38d65f0b33148e563b6f99c7e87447c0e135e8b7017f4f1e7120c53df436", true},
 };
 
 inline bool Sha256Bytes(const void* data, size_t n, std::string& hex) {

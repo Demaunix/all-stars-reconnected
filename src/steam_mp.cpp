@@ -39,7 +39,7 @@
 #include "config_template_embed.h"  // build\, from package\config.ini (tools\config_embed.py)
 
 #define MOD_NAME L"Steam Multiplayer"
-#define MOD_VERSION "1.2.1"
+#define MOD_VERSION "1.2.2"
 static const uint32_t kAppId = 34190;
 // sdk/redistributable_bin/steam_api.dll from Steamworks SDK 1.65 (32-bit).
 static const char kSteamApiSha256[] = "1cb8b7cb77923762d4e49b27e44295369a79e93b5d4282c5e840b268d28fe771";
